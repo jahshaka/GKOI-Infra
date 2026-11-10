@@ -1,0 +1,40 @@
+variable "account_id" {
+  type    = string
+  default = "127214190346"
+}
+
+variable "source_bucket" {
+  description = "EXISTING bucket the release tool uploads source ZIPs to (not managed here)."
+  type        = string
+  default     = "gkoi-build-sources-127214190346"
+}
+
+variable "keep_images" {
+  description = "ECR lifecycle: keep the last N images per repo."
+  type        = number
+  default     = 20
+}
+
+# Plan §C14: one CodeBuild project per app repo; each pushes only its own ECR repos.
+variable "build_projects" {
+  type = map(object({
+    repositories = list(string)
+  }))
+  default = {
+    aisolver-www = {
+      repositories = ["cms-server", "cms-nginx"]
+    }
+    mikaido = {
+      repositories = ["engine-api", "engine-worker", "engine-web", "media-agent", "media-origin", "mediamtx"]
+    }
+    filemanager = {
+      repositories = ["fm-api", "fm-worker", "fm-web"]
+    }
+  }
+}
+
+variable "extra_repositories" {
+  description = "Repos no project here pushes (the War Room's image is pushed by its own tooling)."
+  type        = list(string)
+  default     = ["warroom-game"]
+}

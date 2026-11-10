@@ -1,0 +1,30 @@
+# The gkoi-infra-runner CodeBuild project (us-west-2). Source: s3://gkoi-build-sources-127214190346/gkoi-infra/source.zip
+# (a zip of THIS repo from the orchestrator's checkout). Environment, set per build:
+#   TF_STACK      the stack directory under envs/prod2/ (network | edge-alb | data | registry | observability)
+#   TF_ACTION     plan | apply   (apply = plan -out, then apply exactly that saved plan, in the same build)
+#   ALLOW_DESTROY yes            (only with apply: required when the plan deletes or replaces anything)
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TF_VERSION: "1.9.8"
+    # sha256 of terraform_1.9.8_linux_amd64.zip from releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_SHA256SUMS
+    TF_SHA256: "186e0145f5e5f2eb97cbd785bc78f21bae4ef15119349f6ad4fa535b83b10df8"
+    TF_IN_AUTOMATION: "1"
+    TF_INPUT: "0"
+    TF_CLI_ARGS_init: "-no-color"
+    TF_CLI_ARGS_plan: "-no-color"
+    TF_CLI_ARGS_apply: "-no-color"
+
+phases:
+  install:
+    commands:
+      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+      - echo "${TF_SHA256}  /tmp/terraform.zip" | sha256sum -c -
+      - unzip -o -q /tmp/terraform.zip -d /usr/local/bin terraform
+      - terraform version
+      - command -v jq >/dev/null || yum install -y -q jq
+  build:
+    commands:
+      - bash tools/tf-run.sh
