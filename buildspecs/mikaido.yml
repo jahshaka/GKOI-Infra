@@ -21,7 +21,7 @@ env:
   shell: bash
   variables:
     GKOI_REPO: "mikaido"
-    GKOI_IMAGES: "engine-api engine-worker engine-web media-agent mediamtx"
+    GKOI_IMAGES: "engine-api engine-worker engine-web media-agent mediamtx engine-edge"
     GKOI_WORK: "/tmp/gkoi"
     GKOI_STAGES: "verify preflight gate build push"
     # buildx, sha256 from github.com/docker/buildx/releases/download/v0.19.3/checksums.txt (buildx-v0.19.3.linux-amd64)
@@ -336,5 +336,6 @@ phases:
           gkoi_build_image media-agent infra/docker/media-agent.Dockerfile - --build-arg "FFMPEG_IMAGE=$FF" "${ID[@]}"
           # mk-relay is deliberately unlabelled (compose.engine.yml header): no BUILD_SHA/BUILD_TIME.
           gkoi_build_image mediamtx infra/docker/mk-relay.Dockerfile - --build-arg "FFMPEG_IMAGE=$FF"
+          gkoi_build_image engine-edge infra/docker/engine-edge.Dockerfile - "${ID[@]}"
         fi
         if gkoi_stage push; then gkoi_push; fi
