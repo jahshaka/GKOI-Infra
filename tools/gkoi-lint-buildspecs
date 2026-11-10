@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# gkoi-lint-buildspecs: check buildspecs/*.yml before a release uses them.
+#
+#   gkoi-lint-buildspecs [FILE…]          (default: every buildspecs/*.yml)
+#
+# Per file: parses as YAML (python3 yaml), version 0.2, shell bash, install + build phases with on-failure ABORT, the
+# GKOI_* variables set; the "gkoi-common" block is byte-identical across ALL buildspecs; every command block passes
+# `bash -n` and shellcheck (koalaman/shellcheck:v0.10.0 in Docker), and so does the common library inside its heredoc.
+set -euo pipefail
+GKOI_TOOL=gkoi-lint-buildspecs
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+SHELLCHECK_IMAGE="koalaman/shellcheck:v0.10.0"
+
+if [ $# -eq 0 ]; then set -- "$GKOI_INFRA"/buildspecs/*.yml; fi
+W="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-lint.XXXXXX")"
+trap 'rm -rf "$W"' EXIT
+
+python3 - "$W" "$@" <<'PY'
+import os, sys, yaml
+out = sys.argv[1]
+commons = {}
+bad = 0
+def err(f, msg):
+    global bad
+    bad += 1
+    print(f"FAIL {os.path.basename(f)}: {msg}")
+for f in sys.argv[2:]:
+    name = os.path.basename(f)[:-4]
+    try:
+        d = yaml.safe_load(open(f))
+    except Exception as e:
+        err(f, f"YAML: {e}"); continue
+    if d.get("version") != 0.2: err(f, "version is not 0.2")
+    env = d.get("env", {})
+    if env.get("shell") != "bash": err(f, "env.shell is not bash")
+    vs = env.get("variables", {})
+    for k in ("GKOI_REPO", "GKOI_IMAGES", "GKOI_WORK", "GKOI_STAGES", "BUILDX_VERSION", "BUILDX_SHA256"):
+        if not vs.get(k): err(f, f"variable {k} missing")
+    if vs.get("GKOI_REPO") != name: err(f, f"GKOI_REPO {vs.get('GKOI_REPO')} != file name {name}")
+    if vs.get("GKOI_STAGES") != "verify preflight gate build push": err(f, "GKOI_STAGES is not the full list")
+    ph = d.get("phases", {})
+    if list(ph) != ["install", "build"]: err(f, f"phases are {list(ph)}, want install, build")
+    for p, body in ph.items():
+        if body.get("on-failure") != "ABORT": err(f, f"phase {p} lacks on-failure: ABORT")
+        for i, c in enumerate(body.get("commands", [])):
+            open(os.path.join(out, f"{name}.{p}.{i}.sh"), "w").write("#!/usr/bin/env bash\n" + c)
+    inst = ph.get("install", {}).get("commands", [""])[0]
+    a, b = "# ==== gkoi-common BEGIN ====\n", "# ==== gkoi-common END ====\n"
+    if a not in inst or b not in inst: err(f, "no gkoi-common markers"); continue
+    block = inst.split(a, 1)[1].split(b, 1)[0]
+    commons[name] = block
+    lib = block.split("<<'GKOI_COMMON'\n", 1)[1].rsplit("GKOI_COMMON\n", 1)[0]
+    open(os.path.join(out, f"{name}.lib.sh"), "w").write("#!/usr/bin/env bash\n" + lib)
+if len(set(commons.values())) > 1:
+    first = next(iter(commons))
+    for n, c in commons.items():
+        if c != commons[first]: err(n + ".yml", f"the gkoi-common block differs from {first}.yml")
+for n in commons: print(f"ok   {n}.yml: YAML, phases, variables")
+if len(commons) > 1 and len(set(commons.values())) == 1: print(f"ok   gkoi-common identical in {len(commons)} files")
+sys.exit(1 if bad else 0)
+PY
+
+rc=0
+for s in "$W"/*.sh; do
+  bash -n "$s" || { echo "FAIL bash -n $(basename "$s")"; rc=1; }
+done
+# SC1091: the build block sources the library the install block wrote (not visible to shellcheck: checked separately).
+# SC2154: variables the buildspec env / the project / StartBuild provide.
+names=()
+for s in "$W"/*.sh; do names+=("$(basename "$s")"); done
+if docker run --rm -v "$W":/s:ro -w /s "$SHELLCHECK_IMAGE" -s bash -e SC1091,SC2154 "${names[@]}"; then
+  echo "ok   bash -n + shellcheck: $(find "$W" -name '*.sh' | wc -l) blocks"
+else
+  echo "FAIL shellcheck"; rc=1
+fi
+exit $rc

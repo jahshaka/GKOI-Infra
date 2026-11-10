@@ -30,11 +30,14 @@ variable "build_projects" {
     filemanager = {
       repositories = ["fm-api", "fm-worker", "fm-web"]
     }
+    warroom-game = {
+      repositories = ["warroom-game"]
+    }
   }
 }
 
 variable "extra_repositories" {
   description = "Repos no project here pushes (the War Room's image is pushed by its own tooling)."
   type        = list(string)
-  default     = ["warroom-game"]
+  default     = []
 }

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# gkoi-tag: cut the per-site release tag gkoi-YYYY.MM.DD-N (UTC date, next free N) on a repo's CURRENT commit, after
+# its gate passed (PLAN-AWS-MIGRATION-PROD2-V1 §C14: prod only ever runs a tagged, gated version).
+#
+#   gkoi-tag <repo> (--gate-log FILE | --yes) [--push]
+#
+#   <repo>        aisolver-www | mikaido | filemanager (the checkout under the workspace root)
+#   --gate-log F  the gate run's log for THIS commit: must be non-empty and written after the commit; its path and
+#                 sha256 go into the annotated tag's message, its last lines are printed
+#   --yes         the gate passed and you say so (recorded in the tag message as such)
+#   --push        also `git push origin <tag>` (default: printed, not run)
+#
+# Refuses: uncommitted tracked changes, a commit not on main / origin/main / a hotfix/ branch, a commit that already
+# carries a gkoi-* tag. The tag is annotated, made with the repo's own git identity.
+set -euo pipefail
+GKOI_TOOL=gkoi-tag
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 1 ] || usage
+REPO="$1"
+shift
+GATE_LOG="" YES=0 PUSH=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gate-log) GATE_LOG="$2"; shift 2 ;;
+    --yes) YES=1; shift ;;
+    --push) PUSH=1; shift ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+case " $GKOI_APP_REPOS " in *" $REPO "*) ;; *) die "gkoi-tag tags $GKOI_APP_REPOS (the War Room's tags are its image tags)" ;; esac
+[ -n "$GATE_LOG" ] || [ "$YES" = 1 ] || die "say how the gate passed: --gate-log FILE or --yes"
+DIR="$(repo_dir "$REPO")"
+git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$DIR is not a git checkout"
+
+git -C "$DIR" diff --quiet HEAD -- || die "$DIR has uncommitted changes to tracked files: the gate result would not be this commit's"
+COMMIT="$(git -C "$DIR" rev-parse HEAD)"
+LINE="$(release_line_of "$DIR" "$COMMIT")" || die "HEAD $COMMIT is not on main, origin/main or a hotfix/ branch"
+EXISTING="$(git -C "$DIR" tag --points-at "$COMMIT" -l 'gkoi-*' | head -n1)"
+[ -z "$EXISTING" ] || die "$COMMIT is already released as $EXISTING"
+
+if [ -n "$GATE_LOG" ]; then
+  [ -s "$GATE_LOG" ] || die "the gate log $GATE_LOG is missing or empty"
+  [ "$(stat -c %Y "$GATE_LOG")" -ge "$(git -C "$DIR" log -1 --format=%ct "$COMMIT")" ] \
+    || die "the gate log $GATE_LOG is older than the commit: it cannot be this commit's gate"
+  GATE_NOTE="gate log: $(readlink -f "$GATE_LOG") (sha256 $(sha256_of "$GATE_LOG"))"
+  say "the gate log's last lines:"
+  tail -n 5 "$GATE_LOG" | sed 's/^/  | /'
+else
+  GATE_NOTE="gate: confirmed by the operator/orchestrator (--yes)"
+fi
+
+DAY="$(date -u +%Y.%m.%d)"
+REMOTE_TAGS=""
+if [ "$PUSH" = 1 ]; then
+  REMOTE_TAGS="$(git -C "$DIR" ls-remote --tags origin "refs/tags/gkoi-$DAY-*" | sed 's|.*refs/tags/||')" \
+    || die "cannot list origin's tags"
+fi
+N=1
+while git -C "$DIR" rev-parse -q --verify "refs/tags/gkoi-$DAY-$N" >/dev/null \
+      || grep -qx "gkoi-$DAY-$N" <<<"$REMOTE_TAGS"; do
+  N=$((N + 1))
+done
+TAG="gkoi-$DAY-$N"
+
+git -C "$DIR" tag -a "$TAG" -m "GKOI release $TAG ($REPO)
+
+commit: $COMMIT (on ${LINE#refs/})
+$GATE_NOTE" "$COMMIT" || die "git tag failed"
+say "tagged $REPO $COMMIT as $TAG"
+
+if [ "$PUSH" = 1 ]; then
+  git -C "$DIR" push origin "refs/tags/$TAG" || die "the push of $TAG failed (the local tag stays)"
+  say "pushed $TAG to origin"
+else
+  say "not pushed; to publish it:"
+  show git -C "$DIR" push origin "refs/tags/$TAG"
+fi
+say "next: gkoi-release $REPO $TAG"

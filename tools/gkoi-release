@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# gkoi-release: build + push one release of one repo through its CodeBuild project (PLAN-AWS-MIGRATION-PROD2-V1 §C14).
+#
+#   gkoi-release <repo> <tag> [--dry-run] [--no-start] [--upload-url-file FILE] [--inputs-upload-url-file FILE]
+#                             [--cache-from TAG|none] [--ref REF] [--inbox DIR]
+#
+#   <repo>  aisolver-www | mikaido | filemanager   <tag> = gkoi-YYYY.MM.DD-N, an existing LOCAL tag in that checkout
+#           warroom-game                           <tag> = the War Room image tag (1.0.15.3.3-h6); the source is
+#                                                  GKOIBuilder_AI's ops/warroom-game at --ref (default main)
+#
+# Steps: the tag (or --ref) must be on a commit reachable from main, origin/main or a hotfix/ branch → `git archive
+# --format=zip` of it from the LOCAL checkout (GitHub is never involved) → sha256 → upload to
+# s3://gkoi-build-sources-<acct>/<repo>/<tag>/source.zip → start gkoi-build-<repo> with --buildspec-override =
+# buildspecs/<repo>.yml and env RELEASE_TAG / SOURCE_SHA256 / SOURCE_COMMIT / SOURCE_S3_URI / RESULT_S3_URI /
+# CACHE_FROM_TAG → wait (phase changes; the log's tail on failure) → download <repo>/<tag>/images.json → write it to
+# envs/prod2/releases/<repo>.json.
+# warroom-game also uploads inputs.tar (the inbox's game server + helpers files named by the COMMITTED
+# pins/<tag>.sha256, each beside its .sha256, each checked here against the pin first) with env INPUTS_SHA256.
+#
+#   --dry-run                    everything up to (not including) the upload, then print the commands; no AWS call
+#   --no-start                   upload, write start-build.json and stop (start it yourself, e.g. through the AWS MCP)
+#   --upload-url-file FILE       upload source.zip with the presigned PUT URL in FILE instead of gkoi-aws
+#   --inputs-upload-url-file F   the same for warroom-game's inputs.tar
+#   --ci-upload-url-file F       the same for the pinned gate image (mikaido, filemanager: MinIO), when not staged yet
+#   --cache-from TAG|none        the previous release tag for the layer cache (default: envs/prod2/releases/<repo>.json)
+#   --ref REF                    warroom-game only: the GKOIBuilder_AI commit (default main)
+#   --inbox DIR                  warroom-game only: the release inbox (default $WARROOM_INBOX or
+#                                ~/inbox/builds/war-room-server)
+set -euo pipefail
+GKOI_TOOL=gkoi-release
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || usage
+REPO="$1" TAG="$2"
+shift 2
+DRY=0 NOSTART=0 URLF="" IURLF="" CURLF="" CACHE_FROM="" REF="main" INBOX="${WARROOM_INBOX:-$HOME/inbox/builds/war-room-server}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --no-start) NOSTART=1; shift ;;
+    --upload-url-file) URLF="$(readlink -f "$2")"; shift 2 ;;
+    --inputs-upload-url-file) IURLF="$(readlink -f "$2")"; shift 2 ;;
+    --ci-upload-url-file) CURLF="$(readlink -f "$2")"; shift 2 ;;
+    --cache-from) CACHE_FROM="$2"; shift 2 ;;
+    --ref) REF="$2"; shift 2 ;;
+    --inbox) INBOX="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+
+DIR="$(repo_dir "$REPO")"
+BUILDSPEC="$GKOI_INFRA/buildspecs/$REPO.yml"
+[ -r "$BUILDSPEC" ] || die "no buildspec $BUILDSPEC"
+git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$DIR is not a git checkout"
+GKOI_WORK="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-release.XXXXXX")"
+KEEP_WORK=0
+cleanup() { if [ "$KEEP_WORK" = 0 ]; then rm -rf "$GKOI_WORK"; else say "work directory kept: $GKOI_WORK"; fi; }
+trap cleanup EXIT
+
+# ---------- the source ----------
+if [ "$REPO" = warroom-game ]; then
+  [[ "$TAG" =~ $GKOI_WARROOM_TAG_RE ]] || die "not a War Room tag (<game version>[<letter>][-h<n>]): $TAG"
+  COMMIT="$(git -C "$DIR" rev-parse -q --verify "$REF^{commit}")" || die "no commit '$REF' in $DIR"
+  PIN_PATH="ops/warroom-game/pins/$TAG.sha256"
+  git -C "$DIR" show "$COMMIT:$PIN_PATH" > "$GKOI_WORK/pin" 2>/dev/null \
+    || die "$PIN_PATH is not committed at $REF ($COMMIT): build + pin it on the dev box first (warroom-game.sh build)"
+  ARCHIVE_ARGS=("$COMMIT" ops/warroom-game)
+  SOURCE_DESC="GKOIBuilder_AI $REF ops/warroom-game"
+else
+  [[ "$TAG" =~ $GKOI_TAG_RE ]] || die "not a release tag (gkoi-YYYY.MM.DD-N): $TAG"
+  COMMIT="$(git -C "$DIR" rev-parse -q --verify "refs/tags/$TAG^{commit}")" || die "no local tag $TAG in $DIR"
+  ARCHIVE_ARGS=("refs/tags/$TAG")
+  SOURCE_DESC="$REPO tag $TAG"
+fi
+LINE="$(release_line_of "$DIR" "$COMMIT")" || die "$COMMIT is not on main, origin/main or a hotfix/ branch of $DIR"
+say "$SOURCE_DESC = $COMMIT (on $LINE)"
+
+git -C "$DIR" archive --format=zip -o "$GKOI_WORK/source.zip" "${ARCHIVE_ARGS[@]}" || die "git archive failed"
+[ "$(zip_comment "$GKOI_WORK/source.zip")" = "$COMMIT" ] || die "the zip does not carry commit $COMMIT"
+SOURCE_SHA256="$(sha256_of "$GKOI_WORK/source.zip")"
+say "source.zip: $(zip_file_count "$GKOI_WORK/source.zip") files, $(stat -c %s "$GKOI_WORK/source.zip") bytes, sha256 $SOURCE_SHA256"
+
+# ---------- warroom-game: the inputs (game server + helpers), checked against the committed pin ----------
+INPUTS_SHA256=""
+if [ "$REPO" = warroom-game ]; then
+  GV="${TAG%-h*}"
+  SERVER_DIR="$INBOX/$GV"
+  HELPERS_DIR="$SERVER_DIR"
+  [ "$TAG" != "$GV" ] && [ -d "$INBOX/$TAG" ] && HELPERS_DIR="$INBOX/$TAG"
+  [ -d "$SERVER_DIR" ] || die "no game-server release folder $SERVER_DIR"
+  mkdir -p "$GKOI_WORK/inputs/server" "$GKOI_WORK/inputs/helpers"
+  n=0
+  while read -r want path; do
+    [ -n "$path" ] || continue
+    role="${path%%/*}" f="${path#*/}"
+    case "$role" in server) from="$SERVER_DIR" ;; helpers) from="$HELPERS_DIR" ;; *) die "pin line with role '$role': $path" ;; esac
+    [ -f "$from/$f" ] || die "missing $from/$f"
+    [ -f "$from/$f.sha256" ] || die "missing $from/$f.sha256"
+    got="$(sha256_of "$from/$f")"
+    [ "$got" = "$want" ] || die "$from/$f does not match the pin ($path): $got"
+    (cd "$from" && sha256sum -c --strict --quiet "$f.sha256") || die "$from/$f.sha256 does not check"
+    cp -p "$from/$f" "$from/$f.sha256" "$GKOI_WORK/inputs/$role/"
+    n=$((n + 1))
+  done < "$GKOI_WORK/pin"
+  [ "$n" -gt 0 ] || die "the pin file is empty"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -cf "$GKOI_WORK/inputs.tar" -C "$GKOI_WORK/inputs" server helpers
+  rm -rf "$GKOI_WORK/inputs"
+  INPUTS_SHA256="$(sha256_of "$GKOI_WORK/inputs.tar")"
+  FROM_DESC="$SERVER_DIR"
+  [ "$HELPERS_DIR" = "$SERVER_DIR" ] || FROM_DESC="$SERVER_DIR + $HELPERS_DIR"
+  say "inputs.tar: $n pinned files (+ .sha256) from $FROM_DESC, $(stat -c %s "$GKOI_WORK/inputs.tar") bytes, sha256 $INPUTS_SHA256"
+fi
+
+# ---------- the pinned gate image (MinIO: no public registry serves it any more) ----------
+# The buildspec names it (MINIO_IMAGE, MINIO_IMAGE_KEY, MINIO_CONFIG_DIGEST) and loads it from s3://<bucket>/<repo>/<key>.
+# Staged once per repo prefix from the dev box's copy, checked with the buildspec's OWN checker before the upload.
+CI_IMAGE="" CI_KEY="" CI_DIGEST=""
+read -r CI_IMAGE CI_KEY CI_DIGEST < <(python3 -I -c '
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1]))["env"]["variables"]
+print(v.get("MINIO_IMAGE", "-"), v.get("MINIO_IMAGE_KEY", "-"), v.get("MINIO_CONFIG_DIGEST", "-"))' "$BUILDSPEC") \
+  || die "cannot read $BUILDSPEC"
+[ "$CI_IMAGE" != - ] || CI_IMAGE=""
+stage_ci_image() { # docker save → gzip → the buildspec's checker; leaves ci-image.tar.gz in the work directory
+  docker image inspect "$CI_IMAGE" >/dev/null 2>&1 || die "$CI_IMAGE is not on this box: it cannot be staged"
+  python3 -I -c '
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1]))["phases"]["install"]["commands"][0]
+print(c.split("<<\x27PYCHECK\x27", 1)[1].split("\n", 1)[1].split("PYCHECK\n", 1)[0])' "$BUILDSPEC" > "$GKOI_WORK/check.py"
+  docker save "$CI_IMAGE" -o "$GKOI_WORK/ci-image.tar" || die "docker save $CI_IMAGE failed"
+  python3 -I "$GKOI_WORK/check.py" "$GKOI_WORK/ci-image.tar" "$CI_IMAGE" "$CI_DIGEST" \
+    || die "the local $CI_IMAGE is not the pinned one ($CI_DIGEST)"
+  gzip -n "$GKOI_WORK/ci-image.tar"
+  rm -f "$GKOI_WORK/check.py"
+}
+
+# ---------- the build request ----------
+PREFIX="$REPO/$TAG"
+SOURCE_KEY="$PREFIX/source.zip"
+INPUTS_KEY="$PREFIX/inputs.tar"
+RESULT_KEY="$PREFIX/images.json"
+RELEASES="$GKOI_INFRA/envs/prod2/releases/$REPO.json"
+if [ -z "$CACHE_FROM" ]; then
+  CACHE_FROM=none
+  [ -r "$RELEASES" ] && CACHE_FROM="$(jq -r '.tag // "none"' "$RELEASES")"
+fi
+[ "$CACHE_FROM" != "$TAG" ] || CACHE_FROM=none
+PROJECT="gkoi-build-$REPO"
+
+ENV_ARGS=(--arg tag "$TAG" --arg sha "$SOURCE_SHA256" --arg commit "$COMMIT" --arg cache "$CACHE_FROM"
+  --arg src "s3://$GKOI_BUCKET/$SOURCE_KEY" --arg result "s3://$GKOI_BUCKET/$RESULT_KEY"
+  --arg inputs "s3://$GKOI_BUCKET/$INPUTS_KEY" --arg isha "$INPUTS_SHA256")
+jq -n --arg project "$PROJECT" --arg loc "$GKOI_BUCKET/$SOURCE_KEY" --rawfile spec "$BUILDSPEC" "${ENV_ARGS[@]}" '
+  def v($n; $x): {name: $n, value: $x, type: "PLAINTEXT"};
+  { projectName: $project, sourceTypeOverride: "S3", sourceLocationOverride: $loc, buildspecOverride: $spec,
+    environmentVariablesOverride: ([v("RELEASE_TAG"; $tag), v("SOURCE_SHA256"; $sha), v("SOURCE_COMMIT"; $commit),
+      v("SOURCE_S3_URI"; $src), v("RESULT_S3_URI"; $result), v("CACHE_FROM_TAG"; $cache)]
+      + (if $isha != "" then [v("INPUTS_S3_URI"; $inputs), v("INPUTS_SHA256"; $isha)] else [] end)) }' \
+  > "$GKOI_WORK/start-build.json"
+
+say "project $PROJECT, buildspec $(basename "$BUILDSPEC") ($(stat -c %s "$BUILDSPEC") bytes), cache-from $CACHE_FROM"
+say "environment:"
+jq -r '.environmentVariablesOverride[] | "  \(.name)=\(.value)"' "$GKOI_WORK/start-build.json"
+
+if [ "$DRY" = 1 ]; then
+  KEEP_WORK=1
+  say "DRY RUN: nothing uploaded, nothing started. From $GKOI_WORK these would run:"
+  show gkoi-aws s3api head-object --bucket "$GKOI_BUCKET" --key "$RESULT_KEY"
+  if [ -n "$URLF" ]; then show curl -fsS -X PUT -T source.zip "<url from $URLF>"
+  else show gkoi-aws s3 cp --no-progress source.zip "s3://$GKOI_BUCKET/$SOURCE_KEY"; fi
+  if [ -n "$INPUTS_SHA256" ]; then
+    if [ -n "$IURLF" ]; then show curl -fsS -X PUT -T inputs.tar "<url from $IURLF>"
+    else show gkoi-aws s3 cp --no-progress inputs.tar "s3://$GKOI_BUCKET/$INPUTS_KEY"; fi
+  fi
+  if [ -n "$CI_IMAGE" ]; then
+    stage_ci_image
+    say "gate image $CI_IMAGE checked against $CI_DIGEST ($(stat -c %s "$GKOI_WORK/ci-image.tar.gz") bytes gz); if not staged yet:"
+    show gkoi-aws s3api head-object --bucket "$GKOI_BUCKET" --key "$REPO/$CI_KEY"
+    show gkoi-aws s3 cp --no-progress ci-image.tar.gz "s3://$GKOI_BUCKET/$REPO/$CI_KEY"
+  fi
+  show gkoi-aws codebuild start-build --cli-input-json file://start-build.json --query build.id --output text
+  show gkoi-aws codebuild batch-get-builds --ids "<build id>"
+  show gkoi-aws s3 cp "s3://$GKOI_BUCKET/$RESULT_KEY" images.json
+  say "then: images.json → ${RELEASES#"$GKOI_INFRA"/}"
+  exit 0
+fi
+
+# ---------- upload, start, wait ----------
+if [ "$NOSTART" = 0 ] || [ -z "$URLF" ]; then
+  STATE="$(s3_state "$RESULT_KEY")" || exit 1
+  [ "$STATE" = absent ] || die "s3://$GKOI_BUCKET/$RESULT_KEY exists: $TAG is already released"
+fi
+if [ -n "$CI_IMAGE" ]; then
+  if [ -n "$CURLF" ]; then
+    stage_ci_image
+    upload ci-image.tar.gz "$REPO/$CI_KEY" "$CURLF"
+  elif [ "$NOSTART" = 1 ] && [ -n "$URLF" ]; then
+    say "NOTE: not checking s3://$GKOI_BUCKET/$REPO/$CI_KEY (presigned mode): the gate needs it (--ci-upload-url-file)"
+  elif STATE="$(s3_state "$REPO/$CI_KEY")" && [ "$STATE" = absent ]; then
+    stage_ci_image
+    upload ci-image.tar.gz "$REPO/$CI_KEY"
+  elif [ "$STATE" = present ]; then
+    say "gate image already staged: s3://$GKOI_BUCKET/$REPO/$CI_KEY"
+  else
+    exit 1
+  fi
+fi
+upload source.zip "$SOURCE_KEY" "$URLF"
+if [ -n "$INPUTS_SHA256" ]; then upload inputs.tar "$INPUTS_KEY" "$IURLF"; fi
+
+if [ "$NOSTART" = 1 ]; then
+  KEEP_WORK=1
+  say "uploaded; NOT started (--no-start). StartBuild parameters: $GKOI_WORK/start-build.json"
+  show gkoi-aws codebuild start-build --cli-input-json file://start-build.json
+  exit 0
+fi
+
+ID="$(cb_start start-build.json)"
+say "started $ID"
+say "console: https://$GKOI_REGION.console.aws.amazon.com/codesuite/codebuild/projects/$PROJECT/build/${ID//:/%3A}/?region=$GKOI_REGION"
+if ! cb_wait "$ID" 0; then
+  KEEP_WORK=1
+  die "$REPO $TAG did NOT build: nothing recorded in ${RELEASES#"$GKOI_INFRA"/}"
+fi
+
+awsc s3 cp --no-progress "s3://$GKOI_BUCKET/$RESULT_KEY" images.json >/dev/null || die "cannot download $RESULT_KEY"
+jq -e --arg t "$TAG" --arg c "$COMMIT" --arg r "$REPO" \
+  '.tag == $t and .commit == $c and .repo == $r and (.images | length > 0)
+   and all(.images[]; .digest | test("^sha256:[0-9a-f]{64}$"))' "$GKOI_WORK/images.json" >/dev/null \
+  || die "images.json does not describe $REPO $TAG @ $COMMIT: $(cat "$GKOI_WORK/images.json")"
+mkdir -p "$(dirname "$RELEASES")"
+cp "$GKOI_WORK/images.json" "$RELEASES.tmp" && mv "$RELEASES.tmp" "$RELEASES"
+say "released $REPO $TAG → ${RELEASES#"$GKOI_INFRA"/}:"
+jq -r '.images | to_entries[] | "  \(.key)  \(.value.digest)"' "$RELEASES"

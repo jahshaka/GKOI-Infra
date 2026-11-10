@@ -1,0 +1,302 @@
+# buildspecs/aisolver-www.yml — the CMS (GKOI site): gate = `docker build --target test`, then cms-server + cms-nginx.
+#
+# Used ONLY through `buildspecOverride` at StartBuild (tools/gkoi-release); the app repos carry no buildspec.
+# Environment (StartBuild overrides, set by gkoi-release):
+#   RELEASE_TAG      the release tag being built (the ECR tag, immutable)
+#   SOURCE_S3_URI    s3://gkoi-build-sources-<acct>/<repo>/<tag>/source.zip (the zip CodeBuild also unpacked)
+#   SOURCE_SHA256    the zip's sha256, computed on the dev box before the upload
+#   SOURCE_COMMIT    the commit the tag points at (git archive writes it into the zip comment; checked)
+#   RESULT_S3_URI    where images.json goes: s3://…/<repo>/<tag>/images.json
+#   CACHE_FROM_TAG   the previous release tag of this repo (inline layer cache), or "none"
+# From the CodeBuild project (registry stack): ECR_REGISTRY (+ AWS_ACCOUNT_ID, ECR_REPOSITORIES, BUILD_CACHE_S3).
+# Stages (GKOI_STAGES, in order): verify → preflight → gate → build → push. A red gate exits before any image is
+# built; push refuses unless every earlier stage ran in this same build. The build is NEVER run from CodeBuild's own
+# unpacked copy: verify re-downloads the object, checks the sha256 + commit, and unpacks that.
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    GKOI_REPO: "aisolver-www"
+    GKOI_IMAGES: "cms-server cms-nginx"
+    GKOI_WORK: "/tmp/gkoi"
+    GKOI_STAGES: "verify preflight gate build push"
+    # buildx, sha256 from github.com/docker/buildx/releases/download/v0.19.3/checksums.txt (buildx-v0.19.3.linux-amd64)
+    BUILDX_VERSION: "v0.19.3"
+    BUILDX_SHA256: "32ed111e941e385c2fb8261eba06a4056915718fd606f8278834ac1931d261a2"
+    # The CMS gate's fork cap + heap on BUILD_GENERAL1_LARGE (8 vCPU / 15 GB): plan §C14. The runtime build passes the
+    # SAME values, so its test stage is a cache hit (the gate runs once).
+    VITEST_MAX_FORKS: "4"
+    GATE_NODE_HEAP_MB: "4096"
+
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        mkdir -p "$GKOI_WORK"
+        # ==== gkoi-common BEGIN ====
+        cat > "$GKOI_WORK/gkoi-common.sh" <<'GKOI_COMMON'
+        # gkoi-common.sh: shared by every GKOI buildspec. The install phase writes it and the build phase sources it.
+        # IDENTICAL in buildspecs/*.yml (tools/gkoi-lint-buildspecs checks); change all four together.
+        gkoi_say() { printf '[gkoi %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+        gkoi_die() { printf '[gkoi] FATAL: %s\n' "$*" >&2; exit 1; }
+        gkoi_stage() { case " ${GKOI_STAGES:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+        gkoi_need() { local v; for v in "$@"; do [ -n "${!v:-}" ] || gkoi_die "env $v is not set"; done; }
+
+        # The pinned buildx (every build goes through it; the War Room's named build contexts need it) + the daemon check.
+        gkoi_install_tools() {
+          gkoi_need BUILDX_VERSION BUILDX_SHA256 GKOI_WORK
+          local d="$HOME/.docker/cli-plugins" i
+          mkdir -p "$d" "$GKOI_WORK/bin"
+          curl -fsSL --retry 3 -o "$GKOI_WORK/bin/buildx" \
+            "https://github.com/docker/buildx/releases/download/$BUILDX_VERSION/buildx-$BUILDX_VERSION.linux-amd64"
+          printf '%s  %s\n' "$BUILDX_SHA256" "$GKOI_WORK/bin/buildx" | sha256sum -c - || gkoi_die "buildx sha256 mismatch"
+          install -m 0755 "$GKOI_WORK/bin/buildx" "$d/docker-buildx"
+          for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info >/dev/null 2>&1 || gkoi_die "no Docker daemon (the CodeBuild project must be privileged)"
+          [ "$(uname -m)" = x86_64 ] || gkoi_die "amd64 only (got $(uname -m))"
+          docker version --format 'docker client {{.Client.Version}}, server {{.Server.Version}}'
+          docker buildx version
+        }
+
+        # Stage verify: fetch the uploaded zip, check its sha256 and the commit git archive wrote into its comment, unpack.
+        gkoi_verify_source() {
+          gkoi_need RELEASE_TAG SOURCE_SHA256 SOURCE_COMMIT GKOI_WORK
+          local zip="$GKOI_WORK/source.zip" got comment
+          if [ -n "${GKOI_LOCAL_ZIP:-}" ]; then
+            cp "$GKOI_LOCAL_ZIP" "$zip"
+          else
+            gkoi_need SOURCE_S3_URI
+            aws s3 cp --no-progress "$SOURCE_S3_URI" "$zip" || gkoi_die "cannot download $SOURCE_S3_URI"
+          fi
+          got="$(sha256sum "$zip" | cut -d' ' -f1)"
+          [ "$got" = "$SOURCE_SHA256" ] || gkoi_die "source sha256 MISMATCH: got $got, want $SOURCE_SHA256"
+          comment="$(python3 -c 'import sys,zipfile; print(zipfile.ZipFile(sys.argv[1]).comment.decode())' "$zip")"
+          [ "$comment" = "$SOURCE_COMMIT" ] || gkoi_die "the zip says commit '$comment', the release says $SOURCE_COMMIT"
+          rm -rf "$GKOI_WORK/src"
+          mkdir -p "$GKOI_WORK/src"
+          unzip -q "$zip" -d "$GKOI_WORK/src" || gkoi_die "unzip failed"
+          SRC="$GKOI_WORK/src"
+          export SRC
+          : > "$GKOI_WORK/built"
+          gkoi_say "source OK: $RELEASE_TAG = $SOURCE_COMMIT, sha256 $got, $(find "$SRC" -type f | wc -l) files"
+        }
+
+        # Stage preflight: nothing of this tag may exist yet (images.json, any ECR tag), then log in to ECR.
+        gkoi_preflight() {
+          gkoi_need RESULT_S3_URI ECR_REGISTRY GKOI_IMAGES RELEASE_TAG
+          [ -z "${GKOI_LOCAL_ZIP:-}" ] || gkoi_die "preflight runs only on an uploaded source"
+          local out rc b k n
+          b="${RESULT_S3_URI#s3://}"; k="${b#*/}"; b="${b%%/*}"
+          rc=0; out="$(aws s3api head-object --bucket "$b" --key "$k" 2>&1)" || rc=$?
+          if [ $rc -eq 0 ]; then gkoi_die "$RESULT_S3_URI exists: $RELEASE_TAG was already released (cut a new tag)"; fi
+          case "$out" in *"(404)"*|*"Not Found"*) ;; *) gkoi_die "cannot check $RESULT_S3_URI: $out" ;; esac
+          for n in $GKOI_IMAGES; do
+            rc=0; out="$(aws ecr describe-images --repository-name "gkoi/$n" --image-ids "imageTag=$RELEASE_TAG" 2>&1)" || rc=$?
+            if [ $rc -eq 0 ]; then gkoi_die "gkoi/$n:$RELEASE_TAG already exists in ECR (tags are immutable; cut a new tag)"; fi
+            case "$out" in
+              *ImageNotFoundException*) ;;
+              *RepositoryNotFoundException*) gkoi_die "ECR repository gkoi/$n does not exist (the registry stack creates it)" ;;
+              *) gkoi_die "cannot check gkoi/$n: $out" ;;
+            esac
+          done
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null \
+            || gkoi_die "ECR login failed"
+          GKOI_PREFLIGHT_DONE=1
+          gkoi_say "preflight OK: $RELEASE_TAG is new in s3 and in ECR ($GKOI_IMAGES)"
+        }
+
+        # Build one runtime image, tagged <registry>/gkoi/<name>:<release tag>. Run from the build context directory.
+        # gkoi_build_image <name> <dockerfile> <target or -> [extra docker build args…]
+        gkoi_build_image() {
+          gkoi_need ECR_REGISTRY RELEASE_TAG GKOI_WORK
+          local name="$1" df="$2" target="$3" ref
+          shift 3
+          ref="$ECR_REGISTRY/gkoi/$name"
+          local a=(--builder default --platform linux/amd64 --progress plain --load -f "$df" -t "$ref:$RELEASE_TAG"
+            --build-arg BUILDKIT_INLINE_CACHE=1)
+          [ "$target" = - ] || a+=(--target "$target")
+          if [ -n "${CACHE_FROM_TAG:-}" ] && [ "$CACHE_FROM_TAG" != none ]; then
+            a+=(--cache-from "type=registry,ref=$ref:$CACHE_FROM_TAG")
+          fi
+          gkoi_say "build gkoi/$name from $df (target $target)"
+          docker buildx build "${a[@]}" "$@" . || gkoi_die "build of gkoi/$name failed"
+          printf '%s\n' "$name" >> "$GKOI_WORK/built"
+        }
+
+        # Stage push: only after every earlier stage ran in THIS shell. Pushes each image, reads its digest back from ECR,
+        # writes images.json and uploads it beside the source.
+        gkoi_push() {
+          local s n ref digest ecr_digest
+          for s in verify preflight gate build push; do
+            gkoi_stage "$s" || gkoi_die "push needs every stage; '$s' is not in GKOI_STAGES"
+          done
+          [ "${GKOI_GATE_PASSED:-}" = 1 ] || gkoi_die "the gate did not pass in this build: nothing is pushed"
+          [ "${GKOI_PREFLIGHT_DONE:-}" = 1 ] || gkoi_die "preflight did not run in this build"
+          [ -z "${GKOI_LOCAL_ZIP:-}" ] || gkoi_die "a local source is never pushed"
+          for n in $GKOI_IMAGES; do grep -qx "$n" "$GKOI_WORK/built" || gkoi_die "gkoi/$n was not built"; done
+          : > "$GKOI_WORK/digests"
+          for n in $GKOI_IMAGES; do
+            ref="$ECR_REGISTRY/gkoi/$n"
+            docker push "$ref:$RELEASE_TAG" || gkoi_die "push of gkoi/$n failed"
+            digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref:$RELEASE_TAG" \
+              | awk -F@ -v r="$ref" '$1==r{print $2; exit}')"
+            ecr_digest="$(aws ecr describe-images --repository-name "gkoi/$n" --image-ids "imageTag=$RELEASE_TAG" \
+              --query 'imageDetails[0].imageDigest' --output text)"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || gkoi_die "no digest for gkoi/$n after the push"
+            [ "$digest" = "$ecr_digest" ] || gkoi_die "gkoi/$n: local digest $digest, ECR says $ecr_digest"
+            printf '%s %s\n' "$n" "$digest" >> "$GKOI_WORK/digests"
+            gkoi_say "pushed gkoi/$n:$RELEASE_TAG $digest"
+          done
+          GKOI_REGISTRY="$ECR_REGISTRY" python3 - "$GKOI_WORK/digests" "$GKOI_WORK/images.json" <<'PY'
+        import json, os, sys
+        images = {}
+        for line in open(sys.argv[1]):
+            name, digest = line.split()
+            images[name] = {"digest": digest, "image": f"{os.environ['GKOI_REGISTRY']}/gkoi/{name}@{digest}"}
+        doc = {
+            "repo": os.environ["GKOI_REPO"],
+            "tag": os.environ["RELEASE_TAG"],
+            "commit": os.environ["SOURCE_COMMIT"],
+            "source_sha256": os.environ["SOURCE_SHA256"],
+            "codebuild_build_id": os.environ.get("CODEBUILD_BUILD_ID", ""),
+            "built_at": os.environ["GKOI_BUILD_TIME"],
+            "images": images,
+        }
+        json.dump(doc, open(sys.argv[2], "w"), indent=2, sort_keys=True)
+        PY
+          aws s3 cp --no-progress --content-type application/json "$GKOI_WORK/images.json" "$RESULT_S3_URI" \
+            || gkoi_die "cannot upload images.json"
+          gkoi_say "released $GKOI_REPO $RELEASE_TAG: $RESULT_S3_URI"
+          cat "$GKOI_WORK/images.json"
+        }
+
+        # Pull with retries (anonymous Docker Hub pulls from shared build IPs time out / get throttled).
+        gkoi_pull() {
+          local n
+          for n in 1 2 3; do
+            docker pull -q "$1" >/dev/null && return 0
+            gkoi_say "pull $1 failed (try $n of 3)"
+            sleep $((n * 10))
+          done
+          gkoi_die "cannot pull $1"
+        }
+
+        # A pinned image no public registry serves any more (the MinIO community images left Docker Hub and quay.io in 2025):
+        # gkoi-release stages a `docker save | gzip` of the dev box's copy at s3://<bucket>/<repo>/<key>. The pin is the image's
+        # CONFIG digest: checked in the tar, every layer checked against the config's diff_ids, amd64, then loaded.
+        # gkoi_load_pinned <image> <config digest> <key under the repo prefix>
+        gkoi_load_pinned() {
+          gkoi_need GKOI_REPO GKOI_WORK
+          local img="$1" want="$2" key="$3" tar="$GKOI_WORK/pinned-image.tar" bucket uri
+          if [ -n "${GKOI_LOCAL_ZIP:-}" ] && docker image inspect "$img" >/dev/null 2>&1; then
+            gkoi_say "local test: the local $img is used as is"
+            return 0
+          fi
+          gkoi_need SOURCE_S3_URI
+          bucket="${SOURCE_S3_URI#s3://}"
+          bucket="${bucket%%/*}"
+          uri="s3://$bucket/$GKOI_REPO/$key"
+          aws s3 cp --no-progress "$uri" "$tar.gz" || gkoi_die "cannot download $uri (gkoi-release stages it)"
+          gunzip -f "$tar.gz" || gkoi_die "$uri is not gzip"
+          python3 -I - "$tar" "$img" "$want" <<'PYCHECK' || gkoi_die "$uri is not $img with config $want"
+        import gzip, hashlib, json, sys, tarfile
+        t = tarfile.open(sys.argv[1]); img, want = sys.argv[2], sys.argv[3]
+        m = json.load(t.extractfile("manifest.json"))
+        if len(m) != 1 or img not in (m[0].get("RepoTags") or []):
+            sys.exit(f"the archive does not hold exactly {img}")
+        def sha(name, uncompressed=False):
+            h, f = hashlib.sha256(), t.extractfile(name)
+            if uncompressed and f.peek(2)[:2] == b"\x1f\x8b":
+                f = gzip.GzipFile(fileobj=f)
+            for b in iter(lambda: f.read(1 << 20), b""):
+                h.update(b)
+            return "sha256:" + h.hexdigest()
+        if sha(m[0]["Config"]) != want:
+            sys.exit("config digest mismatch")
+        cfg = json.load(t.extractfile(m[0]["Config"]))
+        if cfg.get("architecture") != "amd64":
+            sys.exit("not amd64")
+        if [sha(x, True) for x in m[0]["Layers"]] != cfg["rootfs"]["diff_ids"]:
+            sys.exit("the layers do not match the config's diff_ids")
+        print(f"pinned image OK: {img} config {want}, {len(m[0]['Layers'])} layers")
+        PYCHECK
+          docker load -i "$tar" >/dev/null || gkoi_die "docker load of $img failed"
+          docker image inspect "$img" >/dev/null 2>&1 || gkoi_die "the load did not produce $img"
+          rm -f "$tar"
+          gkoi_say "loaded $img from $uri"
+        }
+
+        # The engine's and the file manager's gate services: Postgres + Redis + MinIO on a private network, nothing published.
+        # gkoi_gate_up <pg user> <pg password> <pg db> <s3 user> <s3 password> <bucket…>
+        gkoi_gate_up() {
+          gkoi_need NODE_IMAGE PG_IMAGE REDIS_IMAGE MINIO_IMAGE MINIO_CONFIG_DIGEST MINIO_IMAGE_KEY GKOI_GATE
+          local u="$1" p="$2" db="$3" su="$4" sp="$5" i
+          shift 5
+          for i in "$NODE_IMAGE" "$PG_IMAGE" "$REDIS_IMAGE"; do gkoi_pull "$i"; done
+          gkoi_load_pinned "$MINIO_IMAGE" "$MINIO_CONFIG_DIGEST" "$MINIO_IMAGE_KEY"
+          docker network create "$GKOI_GATE-net" >/dev/null
+          docker run -d --name "$GKOI_GATE-pg" --network "$GKOI_GATE-net" \
+            -e POSTGRES_USER="$u" -e POSTGRES_PASSWORD="$p" -e POSTGRES_DB="$db" "$PG_IMAGE" >/dev/null
+          docker run -d --name "$GKOI_GATE-redis" --network "$GKOI_GATE-net" "$REDIS_IMAGE" >/dev/null
+          docker run -d --name "$GKOI_GATE-minio" --network "$GKOI_GATE-net" \
+            -e MINIO_ROOT_USER="$su" -e MINIO_ROOT_PASSWORD="$sp" "$MINIO_IMAGE" server /data >/dev/null
+          # TCP, not the socket: the image's init server listens on no TCP port, so this only answers after the real start.
+          for i in $(seq 1 120); do docker exec "$GKOI_GATE-pg" pg_isready -q -h 127.0.0.1 -U "$u" -d "$db" && break; sleep 1; done
+          docker exec "$GKOI_GATE-pg" pg_isready -h 127.0.0.1 -U "$u" -d "$db" || gkoi_die "the gate Postgres did not start"
+          for i in $(seq 1 60); do [ "$(docker exec "$GKOI_GATE-redis" redis-cli ping 2>/dev/null)" = PONG ] && break; sleep 1; done
+          [ "$(docker exec "$GKOI_GATE-redis" redis-cli ping)" = PONG ] || gkoi_die "the gate Redis did not start"
+          for i in $(seq 1 60); do
+            docker exec "$GKOI_GATE-minio" mc alias set g http://127.0.0.1:9000 "$su" "$sp" >/dev/null 2>&1 && break; sleep 1
+          done
+          docker exec "$GKOI_GATE-minio" mc alias set g http://127.0.0.1:9000 "$su" "$sp" >/dev/null || gkoi_die "the gate MinIO did not start"
+          for i in "$@"; do docker exec "$GKOI_GATE-minio" mc mb --ignore-existing "g/$i" >/dev/null || gkoi_die "bucket $i"; done
+          gkoi_say "gate services up: $PG_IMAGE, $REDIS_IMAGE, $MINIO_IMAGE (buckets: $*)"
+        }
+        gkoi_gate_down() {
+          [ -n "${GKOI_GATE:-}" ] || return 0
+          docker rm -f -v "$GKOI_GATE-pg" "$GKOI_GATE-redis" "$GKOI_GATE-minio" >/dev/null 2>&1 || true
+          docker network rm "$GKOI_GATE-net" >/dev/null 2>&1 || true
+        }
+        GKOI_COMMON
+        # ==== gkoi-common END ====
+        . "$GKOI_WORK/gkoi-common.sh"
+        gkoi_install_tools
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        . "$GKOI_WORK/gkoi-common.sh"
+        unset GKOI_GATE_PASSED GKOI_PREFLIGHT_DONE SRC
+        GKOI_BUILD_TIME="$(date -u +%FT%TZ)"
+        export GKOI_BUILD_TIME
+        [[ "${RELEASE_TAG:-}" =~ ^gkoi-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]+$ ]] || gkoi_die "not a release tag: '${RELEASE_TAG:-}'"
+        if gkoi_stage verify; then gkoi_verify_source; fi
+        [ -n "${SRC:-}" ] || gkoi_die "no source: the verify stage did not run"
+        if gkoi_stage preflight; then gkoi_preflight; fi
+        cd "$SRC"
+        GATE_ARGS=(--build-arg "VITEST_MAX_FORKS=$VITEST_MAX_FORKS" --build-arg "GATE_NODE_HEAP_MB=$GATE_NODE_HEAP_MB"
+          --build-arg BUILDKIT_INLINE_CACHE=1)
+        if gkoi_stage gate; then
+          # The repo's OWN gate (apps/server/Dockerfile `test` stage: audit:warn, lint, knip, the three typechecks, vitest
+          # against an in-stage Postgres). Its marker is what the runtime stage COPYs.
+          gkoi_say "gate: apps/server/Dockerfile --target test (VITEST_MAX_FORKS=$VITEST_MAX_FORKS)"
+          docker buildx build --builder default --platform linux/amd64 --progress plain --load \
+            -f apps/server/Dockerfile --target test -t gkoi-gate/cms-server:test "${GATE_ARGS[@]}" . \
+            || gkoi_die "the CMS gate is RED: nothing is built or pushed"
+          docker image rm gkoi-gate/cms-server:test >/dev/null
+          GKOI_GATE_PASSED=1
+          gkoi_say "gate GREEN"
+        fi
+        if gkoi_stage build; then
+          [ "${GKOI_GATE_PASSED:-}" = 1 ] || gkoi_die "the build stage needs a green gate in this build"
+          gkoi_build_image cms-server apps/server/Dockerfile runtime "${GATE_ARGS[@]}" \
+            --build-arg "BUILD_SHA=$SOURCE_COMMIT" --build-arg "BUILD_TIME=$GKOI_BUILD_TIME"
+          # The container nginx declares no BUILD_SHA (its revision label would be the upstream base image's): label it here.
+          gkoi_build_image cms-nginx infra/nginx/container/Dockerfile - \
+            --label "org.opencontainers.image.revision=$SOURCE_COMMIT" --label "org.opencontainers.image.created=$GKOI_BUILD_TIME"
+        fi
+        if gkoi_stage push; then gkoi_push; fi

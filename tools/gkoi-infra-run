@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# gkoi-infra-run: run Terraform for one stack in the gkoi-infra-runner CodeBuild project, from THIS checkout.
+#
+#   gkoi-infra-run <stack> plan|apply [--worktree] [--allow-destroy] [--yes] [--dry-run] [--no-start]
+#                                     [--upload-url-file FILE]
+#
+#   <stack>          a directory under envs/prod2/ with a main.tf (network, edge-alb, data, registry, observability, …)
+#   --worktree       plan only: zip the working tree (tracked + untracked, minus .gitignore'd) instead of HEAD
+#   --allow-destroy  apply only: pass ALLOW_DESTROY=yes (the runner refuses a plan that deletes/replaces without it)
+#   --yes            apply without the interactive confirmation
+#   --dry-run        zip + sha256 + print the commands; nothing uploaded, nothing started
+#   --no-start       upload and write start-build.json, do not start
+#   --upload-url-file FILE  upload with the presigned PUT URL in FILE instead of gkoi-aws
+#
+# Zips the repo (`git archive` of HEAD; apply needs a clean tree), uploads it to
+# s3://gkoi-build-sources-<acct>/gkoi-infra/source.zip, starts gkoi-infra-runner with TF_STACK / TF_ACTION
+# (+ ALLOW_DESTROY, SOURCE_SHA256, SOURCE_COMMIT), streams its log until it ends. The runner's buildspec is the repo's
+# own buildspec.yml (in the zip); no override. ONE run at a time: the source key is shared, so a second upload while a
+# run is queued would change what that run builds.
+set -euo pipefail
+GKOI_TOOL=gkoi-infra-run
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || usage
+STACK="$1" ACTION="$2"
+shift 2
+WORKTREE=0 ALLOW_DESTROY=0 YES=0 DRY=0 NOSTART=0 URLF=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --worktree) WORKTREE=1; shift ;;
+    --allow-destroy) ALLOW_DESTROY=1; shift ;;
+    --yes) YES=1; shift ;;
+    --dry-run) DRY=1; shift ;;
+    --no-start) NOSTART=1; shift ;;
+    --upload-url-file) URLF="$(readlink -f "$2")"; shift 2 ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+case "$ACTION" in plan|apply) ;; *) die "action must be plan or apply, not '$ACTION'" ;; esac
+if ! [[ "$STACK" =~ ^[a-z0-9-]+$ ]] || [ ! -f "$GKOI_INFRA/envs/prod2/$STACK/main.tf" ]; then
+  die "no stack envs/prod2/$STACK (main.tf)"
+fi
+[ -f "$GKOI_INFRA/buildspec.yml" ] || die "no runner buildspec.yml at the repo root"
+if [ "$ACTION" = apply ]; then
+  [ "$WORKTREE" = 0 ] || die "apply runs committed code only (no --worktree)"
+  [ -z "$(git -C "$GKOI_INFRA" status --porcelain)" ] || die "apply needs a clean gkoi-infra tree (commit first)"
+else
+  [ "$ALLOW_DESTROY" = 0 ] || die "--allow-destroy is for apply"
+fi
+
+GKOI_WORK="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-infra-run.XXXXXX")"
+KEEP_WORK=0
+cleanup() { if [ "$KEEP_WORK" = 0 ]; then rm -rf "$GKOI_WORK"; else say "work directory kept: $GKOI_WORK"; fi; }
+trap cleanup EXIT
+
+HEAD="$(git -C "$GKOI_INFRA" rev-parse HEAD)"
+if [ "$WORKTREE" = 1 ]; then
+  COMMIT="worktree-of-$HEAD"
+  (cd "$GKOI_INFRA" && git ls-files -co --exclude-standard | zip -q -X "$GKOI_WORK/source.zip" -@) \
+    || die "zip of the working tree failed"
+else
+  COMMIT="$HEAD"
+  [ -z "$(git -C "$GKOI_INFRA" status --porcelain)" ] \
+    || say "NOTE: the tree has uncommitted changes; they are NOT in this run (HEAD only; --worktree for a plan)"
+  git -C "$GKOI_INFRA" archive --format=zip -o "$GKOI_WORK/source.zip" HEAD || die "git archive failed"
+fi
+SOURCE_SHA256="$(sha256_of "$GKOI_WORK/source.zip")"
+say "gkoi-infra $COMMIT: $(zip_file_count "$GKOI_WORK/source.zip") files, sha256 $SOURCE_SHA256"
+unzip -Z1 "$GKOI_WORK/source.zip" | grep -qx buildspec.yml || die "the zip has no buildspec.yml (commit it, or --worktree)"
+
+KEY="gkoi-infra/source.zip"
+PROJECT="gkoi-infra-runner"
+jq -n --arg project "$PROJECT" --arg loc "$GKOI_BUCKET/$KEY" --arg stack "$STACK" --arg action "$ACTION" \
+  --arg sha "$SOURCE_SHA256" --arg commit "$COMMIT" --arg destroy "$ALLOW_DESTROY" '
+  def v($n; $x): {name: $n, value: $x, type: "PLAINTEXT"};
+  { projectName: $project, sourceTypeOverride: "S3", sourceLocationOverride: $loc,
+    environmentVariablesOverride: ([v("TF_STACK"; $stack), v("TF_ACTION"; $action), v("SOURCE_SHA256"; $sha),
+      v("SOURCE_COMMIT"; $commit)] + (if $destroy == "1" then [v("ALLOW_DESTROY"; "yes")] else [] end)) }' \
+  > "$GKOI_WORK/start-build.json"
+say "$PROJECT: TF_STACK=$STACK TF_ACTION=$ACTION$([ "$ALLOW_DESTROY" = 1 ] && printf ' ALLOW_DESTROY=yes')"
+
+if [ "$DRY" = 1 ]; then
+  KEEP_WORK=1
+  say "DRY RUN: nothing uploaded, nothing started. From $GKOI_WORK these would run:"
+  if [ -n "$URLF" ]; then show curl -fsS -X PUT -T source.zip "<url from $URLF>"
+  else show gkoi-aws s3 cp --no-progress source.zip "s3://$GKOI_BUCKET/$KEY"; fi
+  show gkoi-aws codebuild start-build --cli-input-json file://start-build.json --query build.id --output text
+  show gkoi-aws codebuild batch-get-builds --ids "<build id>"
+  show gkoi-aws logs get-log-events --log-group-name "<group>" --log-stream-name "<stream>" --start-from-head
+  exit 0
+fi
+
+if [ "$ACTION" = apply ] && [ "$YES" = 0 ]; then
+  [ -t 0 ] || die "apply needs --yes when not run from a terminal"
+  read -r -p "apply $STACK at $COMMIT$([ "$ALLOW_DESTROY" = 1 ] && printf ' WITH ALLOW_DESTROY')? type the stack name: " answer
+  [ "$answer" = "$STACK" ] || die "not confirmed"
+fi
+
+upload source.zip "$KEY" "$URLF"
+if [ "$NOSTART" = 1 ]; then
+  KEEP_WORK=1
+  say "uploaded; NOT started (--no-start). StartBuild parameters: $GKOI_WORK/start-build.json"
+  exit 0
+fi
+ID="$(cb_start start-build.json)"
+say "started $ID; streaming its log"
+cb_wait "$ID" 1 || die "$STACK $ACTION FAILED ($ID)"

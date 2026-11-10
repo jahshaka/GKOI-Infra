@@ -103,6 +103,11 @@ data "aws_iam_policy_document" "this" {
     resources = ["${local.bucket_arn}/${local.source_prefix}*"]
   }
   statement {
+    sid       = "WriteOwnImageList"
+    actions   = ["s3:PutObject"]
+    resources = ["${local.bucket_arn}/${local.source_prefix}*/images.json"]
+  }
+  statement {
     sid       = "OwnCache"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = ["${local.bucket_arn}/${local.cache_prefix}*"]
