@@ -109,23 +109,29 @@ resource "aws_vpc_security_group_ingress_rule" "alb_http" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
+# One rule per DISTINCT task port (two services on 8080 — cms nginx and the engine edge — share it; per-service
+# rules would collide as duplicates).
+locals {
+  task_ports = toset([for s in var.services : tostring(s.port)])
+}
+
 resource "aws_vpc_security_group_egress_rule" "alb_to_tasks" {
-  for_each                     = var.services
+  for_each                     = local.task_ports
   security_group_id            = aws_security_group.alb.id
-  description                  = "To ${each.key} tasks"
+  description                  = "To tasks on ${each.key}"
   ip_protocol                  = "tcp"
-  from_port                    = each.value.port
-  to_port                      = each.value.port
+  from_port                    = tonumber(each.key)
+  to_port                      = tonumber(each.key)
   referenced_security_group_id = local.net.ecs_tasks_security_group_id
 }
 
 resource "aws_vpc_security_group_ingress_rule" "tasks_from_alb" {
-  for_each                     = var.services
+  for_each                     = local.task_ports
   security_group_id            = local.net.ecs_tasks_security_group_id
-  description                  = "${each.key} from the ALB"
+  description                  = "Tasks on ${each.key} from the ALB"
   ip_protocol                  = "tcp"
-  from_port                    = each.value.port
-  to_port                      = each.value.port
+  from_port                    = tonumber(each.key)
+  to_port                      = tonumber(each.key)
   referenced_security_group_id = aws_security_group.alb.id
 }
 
@@ -145,8 +151,9 @@ resource "aws_lb" "this" {
 }
 
 resource "aws_lb_target_group" "svc" {
-  for_each             = var.services
-  name                 = "gkoi-p2-${each.key}"
+  for_each = var.services
+  # The port is in the name so a port change creates the new group BEFORE the old one is released by its rules.
+  name                 = "gkoi-p2-${each.key}-${each.value.port}"
   port                 = each.value.port
   protocol             = "HTTP"
   target_type          = "ip"
@@ -163,6 +170,10 @@ resource "aws_lb_target_group" "svc" {
   }
 
   tags = { Name = "gkoi-p2-${each.key}", service = each.key }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_lb_listener" "http" {
