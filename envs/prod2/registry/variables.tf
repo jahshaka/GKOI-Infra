@@ -37,7 +37,7 @@ variable "build_projects" {
 }
 
 variable "extra_repositories" {
-  description = "Repos no project here pushes (the War Room's image is pushed by its own tooling)."
+  description = "Repos no build project pushes: ci-minio = our pinned copy of the MinIO test image (gone from Docker Hub), pushed once by the orchestrator."
   type        = list(string)
-  default     = []
+  default     = ["ci-minio"]
 }
