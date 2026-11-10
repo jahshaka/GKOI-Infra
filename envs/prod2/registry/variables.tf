@@ -25,7 +25,7 @@ variable "build_projects" {
       repositories = ["cms-server", "cms-nginx"]
     }
     mikaido = {
-      repositories = ["engine-api", "engine-worker", "engine-web", "media-agent", "media-origin", "mediamtx"]
+      repositories = ["engine-api", "engine-edge", "engine-worker", "engine-web", "media-agent", "media-origin", "mediamtx"]
     }
     filemanager = {
       repositories = ["fm-api", "fm-worker", "fm-web"]

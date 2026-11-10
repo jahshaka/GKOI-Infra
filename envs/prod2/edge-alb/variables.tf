@@ -63,8 +63,8 @@ variable "services" {
       max_capacity = 1
     }
     engine-api = {
-      port         = 3000 # the engine api container port (API_PORT default; 3100 is only the dev host port)
-      health_path  = "/api/v1/healthz"
+      port         = 8080 # the engine EDGE sidecar (SPEC-ENGINE-EDGE-SIDECAR-V1) in front of the api (3000); orchestrator 2026-11-10
+      health_path  = "/healthz"
       hosts        = ["engine"]
       min_capacity = 1
       max_capacity = 1
