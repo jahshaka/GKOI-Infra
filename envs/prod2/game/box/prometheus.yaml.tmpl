@@ -1,0 +1,12 @@
+# Written by game-bootstrap.sh (phase cloudwatch): the CloudWatch agent scrapes matchd's loopback monitor (matchd 0.5.4+:
+# box steal / busy %, per-server CPU / RSS). Never the match folders or the gateway's per-session data.
+global:
+  scrape_interval: 1m
+  scrape_timeout: 10s
+scrape_configs:
+  - job_name: matchd
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:@@MONITOR_PORT@@"]
+        labels:
+          region_key: "@@REGION_KEY@@"
