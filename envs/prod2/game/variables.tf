@@ -53,9 +53,9 @@ variable "game_regions" {
     live_gateway_host      = optional(string)
   }))
   default = {
-    usw2  = { enabled = true, serve_live_names = true }
-    euc1  = { enabled = true, serve_live_names = true }
-    use1  = { enabled = true, serve_live_names = true }
+    usw2  = { enabled = true, serve_live_names = true, manage_live_records = true }
+    euc1  = { enabled = true, serve_live_names = true, manage_live_records = true }
+    use1  = { enabled = true, serve_live_names = true, manage_live_records = true }
     apne1 = { enabled = false } # Tokyo: the vCPU quota is pending (operator 2026-11-10); README "Tokyo"
   }
   validation {
