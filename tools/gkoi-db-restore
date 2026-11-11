@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# gkoi-db-restore: restore ONE app's dump from the transit bucket into RDS — the one-off ECS task
+# gkoi-prod2-db-restore-<app> (envs/prod2/db-restore) — wait for it, print its log.
+#
+#   gkoi-db-restore <cms|engine|fm> <s3 key> [--sha256 HEX] [--drop-first] [--generate-password] [--no-wait] [--dry-run]
+#
+#   <s3 key>             <app>/<stamp>/<db>.dump in the transit bucket (gkoi-db-dump prints it)
+#   --sha256 HEX         the dump's sha256 as this box computed it; the task refuses a sidecar that differs
+#   --drop-first         REHEARSALS: DROP the database WITH (FORCE) first (ends its sessions); without it the task
+#                        refuses a database that already holds relations (exit 4)
+#   --generate-password  fill an EMPTY app password secret with a new random one (needs the stack's
+#                        allow_generate_password = true); default: the secret is READ, an empty one refused
+#   --no-wait            start and print the task ARN only
+#   --dry-run            print the RunTask request; start nothing
+#
+# Reads the run config (cluster, subnets, SG, family, log group) from SSM /gkoi/prod2/db-restore/run-config.
+# Exit: the restore container's exit code (0 = RESTORE_OK; restore.sh/fetch.sh list the others), 1 on a tool error.
+# The task's log carries no secret; it is printed as is.
+set -euo pipefail
+GKOI_TOOL=gkoi-db-restore
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || usage
+APP="$1" KEY="$2"; shift 2
+SHA="" DROP=0 GEN=0 WAIT=1 DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --sha256) SHA="$2"; shift 2 ;;
+    --drop-first) DROP=1; shift ;;
+    --generate-password) GEN=1; shift ;;
+    --no-wait) WAIT=0; shift ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+case "$APP" in cms) DB=aisolver_cms ;; engine) DB=mikaido ;; fm) DB=filemanager ;; *) die "app must be cms, engine or fm" ;; esac
+if ! [[ "$KEY" =~ ^$APP/[A-Za-z0-9._/-]+\.dump$ ]] || [[ "$KEY" == *..* ]]; then die "the key must be $APP/<stamp>/<name>.dump (got '$KEY')"; fi
+[ -z "$SHA" ] || [[ "$SHA" =~ ^[0-9a-f]{64}$ ]] || die "--sha256 must be 64 lowercase hex characters"
+
+GKOI_WORK="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-db-restore.XXXXXX")"
+trap 'rm -rf "$GKOI_WORK"' EXIT
+
+cfg="$(awsc ssm get-parameter --name /gkoi/prod2/db-restore/run-config --query Parameter.Value --output text)" \
+  || die "cannot read SSM /gkoi/prod2/db-restore/run-config (is the db-restore stack applied?)"
+CLUSTER="$(jq -r .cluster <<<"$cfg")" GROUP="$(jq -r .log_group <<<"$cfg")" FAMILY="$(jq -r --arg a "$APP" '.families[$a] // empty' <<<"$cfg")"
+[ -n "$FAMILY" ] || die "the run config has no task family for $APP"
+
+drop_value=""; [ "$DROP" = 0 ] || drop_value="$DB"   # restore.sh drops only when DROP_FIRST names the database
+jq -n --argjson c "$cfg" --arg fam "$FAMILY" --arg key "$KEY" --arg sha "$SHA" --arg gen "$GEN" --arg drop "$drop_value" '
+  def e($n; $v): {name: $n, value: $v};
+  { cluster: $c.cluster, taskDefinition: $fam, launchType: "FARGATE", platformVersion: "LATEST", count: 1,
+    startedBy: "gkoi-db-restore",
+    networkConfiguration: { awsvpcConfiguration: { subnets: $c.subnets, securityGroups: $c.securityGroups, assignPublicIp: "DISABLED" } },
+    overrides: { containerOverrides: [
+      { name: "fetch",   environment: [e("DUMP_KEY"; $key), e("DUMP_SHA256"; $sha), e("GENERATE_PASSWORD"; $gen)] },
+      { name: "restore", environment: [e("DROP_FIRST"; $drop)] } ] } }' > "$GKOI_WORK/run-task.json"
+
+say "$APP: $FAMILY on $CLUSTER, dump s3://$(jq -r .bucket <<<"$cfg")/$KEY$([ "$DROP" = 1 ] && printf ', DROP FIRST (%s)' "$DB")$([ "$GEN" = 1 ] && printf ', generate an empty password')"
+if [ "$DRY" = 1 ]; then
+  say "DRY RUN — the RunTask request:"; jq . "$GKOI_WORK/run-task.json"; exit 0
+fi
+
+out="$(awsc ecs run-task --cli-input-json file://run-task.json --output json)" || die "run-task failed"
+ARN="$(jq -r '.tasks[0].taskArn // empty' <<<"$out")"
+[ -n "$ARN" ] || die "run-task started nothing: $(jq -c .failures <<<"$out")"
+TASK_ID="${ARN##*/}"
+say "started $ARN"
+[ "$WAIT" = 1 ] || exit 0
+
+last=""
+while :; do
+  d="$(awsc ecs describe-tasks --cluster "$CLUSTER" --tasks "$ARN" --output json)" || { say "(poll failed, retrying)"; sleep "$GKOI_POLL_SECONDS"; continue; }
+  st="$(jq -r '.tasks[0].lastStatus' <<<"$d")"
+  [ "$st" = "$last" ] || { say "task $st ($(date -u +%H:%M:%S)Z)"; last="$st"; }
+  [ "$st" = STOPPED ] && break
+  sleep "$GKOI_POLL_SECONDS"
+done
+
+say "stopped: $(jq -r '.tasks[0].stoppedReason // "-"' <<<"$d")"
+jq -r '.tasks[0].containers[] | "  \(.name): exit \(.exitCode // "none") \(.reason // "")"' <<<"$d"
+for c in fetch restore; do
+  say "--- log $GROUP $APP/$c/$TASK_ID"
+  awsc logs get-log-events --log-group-name "$GROUP" --log-stream-name "$APP/$c/$TASK_ID" --start-from-head --limit 200 --output json 2>/dev/null \
+    | jq -r '.events[].message' || say "(no log stream: the container did not start)"
+done
+rc="$(jq -r '.tasks[0].containers[] | select(.name == "restore") | .exitCode // empty' <<<"$d")"
+if [ "$rc" = 0 ]; then say "RESTORE_OK ($APP)"; exit 0; fi
+fc="$(jq -r '.tasks[0].containers[] | select(.name == "fetch") | .exitCode // empty' <<<"$d")"
+say "ERROR: the restore did not succeed (fetch exit ${fc:-none}, restore exit ${rc:-none})" >&2
+[[ "$rc" =~ ^[0-9]+$ ]] && [ "$rc" != 0 ] && exit "$rc"
+exit 1

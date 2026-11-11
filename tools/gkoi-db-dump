@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# gkoi-db-dump: dump ONE app's prod database (read-only) to this box and the db-restore transit bucket.
+#
+#   gkoi-db-dump <cms|engine|fm> [--out DIR] [--no-upload] [--check]
+#
+#   --out DIR     where the dump + .sha256 land (default ~/.local/share/gkoi-db-dumps, 0700; files 0600)
+#   --no-upload   keep it local (upload later: re-run, or `gkoi-aws s3 cp` from DIR)
+#   --check       find the container and print its database / version / size; dump nothing
+#
+# On the prod box (ssh alias, `sudo docker`): finds the compose project's postgres container by its compose labels,
+# checks its POSTGRES_DB is the expected database, then streams
+#   pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-acl
+# run INSIDE that container (its own env: no credential leaves the box). Nothing is stopped or changed there.
+# Here: PGDMP magic + `pg_restore -l` (local postgres:16.15-alpine, no network), sha256 → <db>-<stamp>.dump(.sha256),
+# then s3://<transit>/<app>/<stamp>/<db>.dump + .sha256 through gkoi-aws. Prints the gkoi-db-restore command.
+#
+#   app     box             compose project   service  database      (prod 2026-11-06: PG 16.15)
+#   cms     gkoi-beta-site  aisolver-cms      pgdb     aisolver_cms
+#   engine  gkoi-beta-core  mikaido-engine    postgres mikaido
+#   fm      gkoi-beta-core  filemanager       postgres filemanager
+# Overrides: GKOI_DB_DUMP_HOST, GKOI_DB_DUMP_PROJECT, GKOI_DB_DUMP_SERVICE; GKOI_DB_TRANSIT_BUCKET.
+set -euo pipefail
+GKOI_TOOL=gkoi-db-dump
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 1 ] || usage
+APP="$1"; shift
+OUT="${GKOI_DB_DUMP_DIR:-$HOME/.local/share/gkoi-db-dumps}" UPLOAD=1 CHECK=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) OUT="$2"; shift 2 ;;
+    --no-upload) UPLOAD=0; shift ;;
+    --check) CHECK=1; shift ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+case "$APP" in
+  cms) HOST=gkoi-beta-site PROJECT=aisolver-cms SERVICE=pgdb DB=aisolver_cms ;;
+  engine) HOST=gkoi-beta-core PROJECT=mikaido-engine SERVICE=postgres DB=mikaido ;;
+  fm) HOST=gkoi-beta-core PROJECT=filemanager SERVICE=postgres DB=filemanager ;;
+  -h|--help) usage ;;
+  *) die "app must be cms, engine or fm (got '$APP')" ;;
+esac
+HOST="${GKOI_DB_DUMP_HOST:-$HOST}" PROJECT="${GKOI_DB_DUMP_PROJECT:-$PROJECT}" SERVICE="${GKOI_DB_DUMP_SERVICE:-$SERVICE}"
+BUCKET="${GKOI_DB_TRANSIT_BUCKET:-gkoi-prod2-db-transit-$GKOI_ACCOUNT}"
+for v in "$PROJECT" "$SERVICE"; do [[ "$v" =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "bad compose name '$v'"; done
+
+# Every remote command is a fixed string (no local value but the validated names above is spliced into it).
+remote() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@" </dev/null; }
+
+say "$APP: $HOST, compose project $PROJECT, service $SERVICE"
+names="$(remote "sudo docker ps --filter label=com.docker.compose.project=$PROJECT --filter label=com.docker.compose.service=$SERVICE --format '{{.Names}}'")" \
+  || die "cannot list containers on $HOST (ssh / sudo docker)"
+[ -n "$names" ] || die "no RUNNING $PROJECT/$SERVICE container on $HOST"
+[ "$(printf '%s\n' "$names" | wc -l)" = 1 ] || die "more than one $PROJECT/$SERVICE container: $(printf '%s' "$names" | tr '\n' ' ')"
+C="$names"
+[[ "$C" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "unexpected container name '$C'"
+info="$(remote "sudo docker exec $C sh -c 'printf \"%s|%s|\" \"\$POSTGRES_DB\" \"\$(postgres --version)\"; psql -X -At -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -c \"SELECT pg_size_pretty(pg_database_size(current_database()))\"'")" \
+  || die "cannot read $C's database"
+IFS='|' read -r cdb cver csize <<<"$info"
+say "container $C: database $cdb, $cver, size $csize"
+[ "$cdb" = "$DB" ] || die "$C serves '$cdb', not the expected '$DB' — refusing"
+[ "$CHECK" = 0 ] || { say "check only: nothing dumped"; exit 0; }
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+umask 077
+mkdir -p "$OUT"; chmod 700 "$OUT"
+F="$DB-$STAMP.dump"
+say "dumping to $OUT/$F (pg_dump -Fc --no-owner --no-acl inside $C)"
+set +e
+remote "sudo docker exec $C sh -c 'exec pg_dump -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Fc --no-owner --no-acl'" > "$OUT/$F.part"
+ec=$?
+set -e
+[ "$ec" = 0 ] || { rm -f "$OUT/$F.part"; die "pg_dump on $HOST failed (exit $ec)"; }
+[ -s "$OUT/$F.part" ] || { rm -f "$OUT/$F.part"; die "the dump is empty"; }
+[ "$(head -c 5 "$OUT/$F.part")" = PGDMP ] || { rm -f "$OUT/$F.part"; die "not a custom-format archive (no PGDMP magic)"; }
+set +e
+toc="$(docker run --rm --network none -v "$OUT/$F.part:/d.dump:ro" postgres:16.15-alpine pg_restore -l /d.dump)"
+ec=$?
+set -e
+[ "$ec" = 0 ] || { rm -f "$OUT/$F.part"; die "pg_restore -l cannot read the archive (exit $ec)"; }
+mv "$OUT/$F.part" "$OUT/$F"
+SHA="$(sha256_of "$OUT/$F")"
+printf '%s  %s\n' "$SHA" "$DB.dump" > "$OUT/$F.sha256"
+say "ok: $(stat -c %s "$OUT/$F") bytes, $(grep -c ' TABLE DATA ' <<<"$toc") tables with data, $(grep -Ec '^[0-9]+;' <<<"$toc") TOC entries, sha256 $SHA"
+
+KEY="$APP/$STAMP/$DB.dump"
+if [ "$UPLOAD" = 0 ]; then
+  say "NOT uploaded (--no-upload). Local: $OUT/$F (+ .sha256)"; exit 0
+fi
+GKOI_WORK="$OUT"
+say "upload → s3://$BUCKET/$KEY (+ .sha256)"
+awsc s3 cp --no-progress --only-show-errors --sse AES256 "$F" "s3://$BUCKET/$KEY" || die "upload of the dump failed"
+awsc s3 cp --no-progress --only-show-errors --sse AES256 "$F.sha256" "s3://$BUCKET/$KEY.sha256" || die "upload of the .sha256 failed"
+len="$(awsc s3api head-object --bucket "$BUCKET" --key "$KEY" --query ContentLength --output text | tr -d '\r')"
+[ "$len" = "$(stat -c %s "$OUT/$F")" ] || die "the uploaded object is $len bytes, the local dump $(stat -c %s "$OUT/$F")"
+say "uploaded and size-checked. Next:"
+show tools/gkoi-db-restore "$APP" "$KEY" --sha256 "$SHA"

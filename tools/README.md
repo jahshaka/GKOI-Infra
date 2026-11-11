@@ -5,6 +5,8 @@
 | `gkoi-tag <repo> (--gate-log F \| --yes) [--push]` | cut `gkoi-YYYY.MM.DD-N` (UTC, next free N) on the repo's current commit after its gate passed |
 | `gkoi-release <repo> <tag> [--dry-run] …` | zip the tag from the local checkout → S3 → CodeBuild gate + build + push → `envs/prod2/releases/<repo>.json` |
 | `gkoi-infra-run <stack> plan\|apply …` | zip this repo → S3 → the `gkoi-infra-runner` CodeBuild project → stream its log |
+| `gkoi-db-dump <cms\|engine\|fm> [--check] [--no-upload]` | read-only `pg_dump -Fc --no-owner --no-acl` inside the prod box's postgres container → here (0600, sha256) → `s3://gkoi-prod2-db-transit-127214190346/<app>/<stamp>/<db>.dump` |
+| `gkoi-db-restore <app> <key> [--sha256 H] [--drop-first]` | the one-off ECS task `gkoi-prod2-db-restore-<app>` (stack `db-restore`): fetch + sha check → role + database + `pg_restore --role` into RDS → ownership proof; waits, prints the log |
 | `gkoi-lint-buildspecs` | check `buildspecs/*.yml` (YAML, the shared block identical, bash -n, shellcheck) |
 | `lib/gkoi-tools.sh` | shared by the above |
 
@@ -75,3 +77,33 @@ state never go), uploads it to `gkoi-infra/source.zip`, starts `gkoi-infra-runne
 (+ `ALLOW_DESTROY`, `SOURCE_SHA256`, `SOURCE_COMMIT`) and streams the build's log until it ends. The runner uses the
 repo's own root `buildspec.yml` from the zip (no override). One run at a time: the source key is shared.
 `--dry-run`, `--no-start` and `--upload-url-file` work as in gkoi-release.
+
+## Databases: prod → RDS (`gkoi-db-dump` + `gkoi-db-restore`, stack `envs/prod2/db-restore`)
+
+Once: apply `registry` (repos `gkoi/postgres`, `gkoi/aws-cli`), push the two mirrors, apply `db-restore`:
+
+```
+R=127214190346.dkr.ecr.us-west-2.amazonaws.com
+gkoi-aws ecr get-login-password | docker login --username AWS --password-stdin $R
+docker pull postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139   # = postgres:16.15-alpine (amd64)
+docker tag postgres:16.15-alpine $R/gkoi/postgres:16.15-alpine && docker push $R/gkoi/postgres:16.15-alpine
+docker pull amazon/aws-cli@sha256:6977c83ae3dc99f28fcf8276b9ea5eec33833cd5be40574b34112e98113ec7a2  # = 2.22.35
+docker tag amazon/aws-cli:2.22.35 $R/gkoi/aws-cli:2.22.35 && docker push $R/gkoi/aws-cli:2.22.35
+tools/gkoi-infra-run db-restore plan ; tools/gkoi-infra-run db-restore apply
+```
+
+Per app (P1 rehearsal: any time, with `--drop-first` on a re-run; P3 engine + fm, P4 cms: inside the window, after the
+writes stop):
+
+```
+tools/gkoi-db-dump engine --check          # the container, its database, version, size — nothing dumped
+tools/gkoi-db-dump engine                  # prints the next command, with the key and the sha256
+tools/gkoi-db-restore engine engine/<stamp>/mikaido.dump --sha256 <hex> [--drop-first]
+```
+
+The task: `fetch` (gkoi/aws-cli, task role = this app's prefix + this app's password secret, READ) downloads the dump +
+sidecar, checks the sha256, reads the password; `restore` (gkoi/postgres, the RDS master injected from the RDS-managed
+secret) creates/re-asserts the app's ONE role (owner + login: `cms`, `mikaido_app`, `filemanager_app` — the repos' C-4
+rule), creates the database OWNER it (collate C = prod's musl byte order), `pg_restore --no-owner --no-acl --role`
+in one transaction, ANALYZE, proves nothing is owned by anyone else, signs in as the role over TLS: `RESTORE_OK`.
+It refuses a non-empty database without `--drop-first` (exit 4). The services' secrets are untouched.
