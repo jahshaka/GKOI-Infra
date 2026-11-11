@@ -1,0 +1,49 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOpsPsqlRunConfig",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:us-west-2:127214190346:parameter/gkoi/prod2/ops/psql-run-config"
+    },
+    {
+      "Sid": "RunOpsPsqlTasksOnly",
+      "Effect": "Allow",
+      "Action": "ecs:RunTask",
+      "Resource": [
+        "arn:aws:ecs:us-west-2:127214190346:task-definition/gkoi-prod2-ops-psql-cms:*",
+        "arn:aws:ecs:us-west-2:127214190346:task-definition/gkoi-prod2-ops-psql-engine:*",
+        "arn:aws:ecs:us-west-2:127214190346:task-definition/gkoi-prod2-ops-psql-fm:*"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:us-west-2:127214190346:cluster/gkoi-prod2"
+        }
+      }
+    },
+    {
+      "Sid": "PassOnlyTheOpsPsqlExecutionRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::127214190346:role/gkoi/gkoi-prod2-exec-ops-psql",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "WatchTasksInTheProdCluster",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeTasks",
+      "Resource": "arn:aws:ecs:us-west-2:127214190346:task/gkoi-prod2/*"
+    },
+    {
+      "Sid": "ReadOpsPsqlLog",
+      "Effect": "Allow",
+      "Action": "logs:GetLogEvents",
+      "Resource": "arn:aws:logs:us-west-2:127214190346:log-group:/gkoi/prod2/ecs/ops-psql:log-stream:*"
+    }
+  ]
+}
