@@ -69,7 +69,7 @@ else
 fi
 SOURCE_SHA256="$(sha256_of "$GKOI_WORK/source.zip")"
 say "gkoi-infra $COMMIT: $(zip_file_count "$GKOI_WORK/source.zip") files, sha256 $SOURCE_SHA256"
-unzip -Z1 "$GKOI_WORK/source.zip" | grep -qx buildspec.yml || die "the zip has no buildspec.yml (commit it, or --worktree)"
+unzip -Z1 "$GKOI_WORK/source.zip" | grep -x buildspec.yml >/dev/null || die "the zip has no buildspec.yml (commit it, or --worktree)"
 
 KEY="gkoi-infra/source.zip"
 PROJECT="gkoi-infra-runner"
