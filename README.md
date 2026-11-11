@@ -32,8 +32,9 @@ modules/
   media-box/             one region's media box: ASG (1) + launch template, EIP, SGs, /gkoi/ role, SSM config, DNS, alarms
   game-box/              one region's War Room game box: ASG (1) + launch template, EIP, SG, /gkoi/ role, SSM config, DNS, alarms
 envs/prod2/
-  network/  edge-alb/  data/  registry/  observability/  compute/  media/  rehearsal/  game/   one state file each: prod2/<stack>/terraform.tfstate
+  network/  edge-alb/  data/  registry/  observability/  compute/  media/  rehearsal/  game/  ops/   one state file each: prod2/<stack>/terraform.tfstate
   releases/<repo>.json   the pinned image digests gkoi-release records (compute reads them)
+iam/                     policies for the hand-made gkoi-orchestrator role (attached by the operator; iam/README.md)
 ```
 
 The state bucket, lock table, runner project and its role were created by hand in P0 (not managed here).
@@ -51,6 +52,7 @@ The state bucket, lock table, runner project and its role were created by hand i
 | `compute` | ECS cluster `gkoi-prod2` (Container Insights, FARGATE); services `cms`, `engine-api`, `engine-worker`, `fm-api`, `fm-worker`, `fm-web` (each held at 0 while in `parked_services` — default all; `rehearsal = true` points the engine at the scratch bucket only); migrator task definitions `gkoi-prod2-{cms,engine,fm}-migrate`; 25 EMPTY secrets `gkoi/prod2/<app>/<NAME>`; execution roles `/gkoi/gkoi-prod2-exec-{cms,engine,fm}` + task roles `/gkoi/gkoi-prod2-task-*`; log group `/gkoi/prod2/ecs/engine-edge` | network, edge-alb, data, registry state; the existing `gkoi/edge/live-origin` secret (ARN only); the buckets `gkoi-beta-vods` / `gkoi-beta-files`; observability's log groups |
 | `game` | Per enabled game region (usw2, euc1, use1 on; apne1 defined + off): an ASG of ONE War Room game box (`t3a.xlarge` standard credits = the live boxes, Ubuntu 24.04, SSM only) running GKOIBuilder_AI's `ops/warroom-game` from the release's own source.zip, its EIP, SG (tcp 9443, tcp + udp 8443), role `/gkoi/gkoi-prod2-game-<key>`, `/gkoi/prod2/game/<key>/config`, rehearsal A records `game-/gw-<key>-p2` (the live names behind `manage_live_records`), alarms; once: the EMPTY secret `gkoi/prod2/game/match-server-key`, the box bundle. README in `envs/prod2/game/` | network, observability state; `releases/warroom-game.json` (gkoi-release warroom-game); `gkoi/warroom-game` in each region's ECR; zone `gkoi.com` |
 | `rehearsal` | The private go-live rehearsal driver: task definition `gkoi-prod2-rehearsal-driver` (Node 22 Alpine from ECR Public + ffmpeg; the driver inlined), roles `/gkoi/gkoi-prod2-{exec,task}-rehearsal-driver`, log group `/gkoi/prod2/ecs/rehearsal-driver`, SSM `/gkoi/prod2/rehearsal/run-config`. README in `envs/prod2/rehearsal/` | network, edge-alb, data, compute and media state; the gateway + origin-verify secrets (ARNs) |
+| `ops` | The orchestrator's SQL path to RDS (`prod-psql.sh` in GKOIBuilder_AI `scripts/session-tools/`): task definitions `gkoi-prod2-ops-psql-{cms,engine,fm}` (psql as the APP role, one transaction, read only unless asked, the result framed in its log), execution role `/gkoi/gkoi-prod2-exec-ops-psql` (no task role), log group `/gkoi/prod2/ecs/ops-psql` (1 day), SSM `/gkoi/prod2/ops/psql-run-config`. The caller needs `iam/gkoi-orchestrator-ops.json`. README in `envs/prod2/ops/` | data, compute, registry state; `gkoi/ci-postgres` |
 
 **Service counts.** The services live in `compute`. `edge-alb`'s `services` variable carries each control-plane service's
 port, health path, hosts and ECS `min_capacity` / `max_capacity` (all default 1 / 1, operator 2026-11-10) and outputs them
@@ -79,6 +81,7 @@ before origin-live moves to the ALB in P3.
    `envs/prod2/rehearsal/README.md`)
 9. `game` (P6: independent of 3–8 — needs network, observability and a `gkoi-release warroom-game <tag>` record;
    `envs/prod2/game/README.md` "Apply order")
+10. `ops` (after data, compute and registry; then attach `iam/gkoi-orchestrator-ops.json` — `envs/prod2/ops/README.md`)
 
 Each stack: `plan`, read the summary, then `apply` (which re-plans and applies exactly that saved plan).
 
