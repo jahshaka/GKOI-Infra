@@ -50,7 +50,7 @@ data "aws_ec2_managed_prefix_list" "cloudfront" {
 
 resource "aws_security_group" "box" {
   name        = local.name
-  description = "GKOI media box ${var.key}: public ingest (RTMPS, WebRTC ICE) + the engine's private pool ports"
+  description = "GKOI media box ${var.key}: public ingest (RTMPS, WebRTC ICE) + the engine private pool ports"
   vpc_id      = var.vpc_id
   tags        = { Name = local.name }
 }
@@ -79,7 +79,7 @@ resource "aws_vpc_security_group_ingress_rule" "ice" {
 resource "aws_vpc_security_group_ingress_rule" "engine_sg" {
   for_each                     = var.is_home ? toset([for p in local.private_tcp : tostring(p)]) : toset([])
   security_group_id            = aws_security_group.box.id
-  description                  = "Engine ECS tasks → pool port ${each.value}"
+  description                  = "Engine ECS tasks to pool port ${each.value}"
   ip_protocol                  = "tcp"
   from_port                    = tonumber(each.value)
   to_port                      = tonumber(each.value)
@@ -89,7 +89,7 @@ resource "aws_vpc_security_group_ingress_rule" "engine_sg" {
 resource "aws_vpc_security_group_ingress_rule" "engine_cidr" {
   for_each          = var.is_home ? toset([]) : toset([for p in local.private_tcp : tostring(p)])
   security_group_id = aws_security_group.box.id
-  description       = "Engine (home VPC, peered) → pool port ${each.value}"
+  description       = "Engine (home VPC, peered) to pool port ${each.value}"
   ip_protocol       = "tcp"
   from_port         = tonumber(each.value)
   to_port           = tonumber(each.value)
@@ -98,7 +98,7 @@ resource "aws_vpc_security_group_ingress_rule" "engine_cidr" {
 
 resource "aws_vpc_security_group_egress_rule" "box_all" {
   security_group_id = aws_security_group.box.id
-  description       = "All egress (Valkey + the engine over peering, ECR, S3, Secrets Manager, SSM, Let's Encrypt, the platforms)"
+  description       = "All egress (Valkey + the engine over peering, ECR, S3, Secrets Manager, SSM, LetsEncrypt, the platforms)"
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
 }
@@ -114,7 +114,7 @@ resource "aws_security_group" "origin" {
 resource "aws_vpc_security_group_ingress_rule" "origin_cloudfront" {
   count             = var.origin_open_to_world ? 0 : 1
   security_group_id = aws_security_group.origin.id
-  description       = "CloudFront origin-facing → media origin"
+  description       = "CloudFront origin-facing to media origin"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -124,7 +124,7 @@ resource "aws_vpc_security_group_ingress_rule" "origin_cloudfront" {
 resource "aws_vpc_security_group_ingress_rule" "origin_world" {
   count             = var.origin_open_to_world ? 1 : 0
   security_group_id = aws_security_group.origin.id
-  description       = "Anyone → media origin (the X-Origin-Verify lock is the gate)"
+  description       = "Anyone to media origin (the X-Origin-Verify lock is the gate)"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
@@ -134,7 +134,7 @@ resource "aws_vpc_security_group_ingress_rule" "origin_world" {
 resource "aws_vpc_security_group_ingress_rule" "origin_extra" {
   for_each          = var.origin_open_to_world ? toset([]) : toset(var.origin_ingress_cidrs)
   security_group_id = aws_security_group.origin.id
-  description       = "Rehearsal tester → media origin"
+  description       = "Rehearsal tester to media origin"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443

@@ -45,7 +45,7 @@ resource "aws_vpc_security_group_egress_rule" "engine_internal_to_tasks" {
 resource "aws_vpc_security_group_ingress_rule" "tasks_from_engine_internal" {
   count                        = var.create_engine_internal_alb ? 1 : 0
   security_group_id            = local.net.ecs_tasks_security_group_id
-  description                  = "Engine internal ALB → api 3000 (media boxes' /internal/*)"
+  description                  = "Engine internal ALB to api 3000 (media boxes, /internal/*)"
   ip_protocol                  = "tcp"
   from_port                    = 3000
   to_port                      = 3000

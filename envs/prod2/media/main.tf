@@ -370,7 +370,7 @@ resource "aws_vpc_security_group_ingress_rule" "valkey_from_home_box" {
 resource "aws_vpc_security_group_ingress_rule" "engine_internal_from_home_box" {
   count                        = length(module.box_usw2) > 0 && local.engine_internal != null ? 1 : 0
   security_group_id            = local.engine_internal.security_group_id
-  description                  = "usw2 media box → engine internal ALB (3000)"
+  description                  = "usw2 media box to engine internal ALB (3000)"
   ip_protocol                  = "tcp"
   from_port                    = 3000
   to_port                      = 3000
