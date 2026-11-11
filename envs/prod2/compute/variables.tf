@@ -190,9 +190,7 @@ variable "cms_server_secret_env" {
     AUTH_ENCRYPTION_KEY   = "cms/AUTH_ENCRYPTION_KEY"
     APP_API_SECRET        = "cms/APP_API_SECRET"
     LABS_SUB_KEY          = "cms/LABS_SUB_KEY"
-    COMMERCE_PAYOUT_KEY   = "cms/COMMERCE_PAYOUT_KEY"
     RATE_LIMIT_REDIS_URL  = "cms/RATE_LIMIT_REDIS_URL"
-    SMTP_PASS             = "cms/SMTP_PASS"
     GATEWAY_SHARED_SECRET = "engine/GATEWAY_SHARED_SECRET"
     FILES_SHARED_SECRET   = "fm/GATEWAY_SHARED_SECRET"
   }
@@ -218,9 +216,6 @@ variable "engine_secret_env" {
     MK_POOL_READ_SECRET   = "engine/MK_POOL_READ_SECRET"
     MK_POOL_API_PASS      = "engine/MK_POOL_API_PASS"
     PREVIEW_TOKEN_KEY     = "engine/PREVIEW_TOKEN_KEY"
-    TWITCH_CLIENT_SECRET  = "engine/TWITCH_CLIENT_SECRET"
-    GOOGLE_CLIENT_SECRET  = "engine/GOOGLE_CLIENT_SECRET"
-    KICK_CLIENT_SECRET    = "engine/KICK_CLIENT_SECRET"
   }
 }
 

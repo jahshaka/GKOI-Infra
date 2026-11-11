@@ -23,6 +23,7 @@ locals {
     SMTP_PORT               = ""  # from prod (2026-11-11)
     SMTP_USER               = ""  # from prod (2026-11-11)
     MAIL_FROM               = ""  # from prod (2026-11-11)
+    MAIL_DEV_LOG_ONLY       = "1" # as prod: no SMTP yet, sign-in codes go to the log (unset once SMTP is set)
   }
 
   default_cms_nginx_env = {
