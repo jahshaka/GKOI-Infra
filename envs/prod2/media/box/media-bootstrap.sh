@@ -403,7 +403,12 @@ phase_env() {
 compose_render() {
   local agent mtx origin stream origin_host slug ip url n i b pools="" eng
   agent="$(cfg '.images["media-agent"]')"; mtx="$(cfg .images.mediamtx)"; origin="$(cfg '.images["media-origin"]')"
-  stream="$(cfg .stream_host)"; origin_host="$(cfg .origin_host)"; slug="$(cfg .key)"
+  stream="$(cfg .stream_host)"; origin_host="$(cfg .origin_host)"
+  # The live-origin slug is the ENGINE's regionSlug(region) (mikaido shared/liveOrigin.ts: area + the direction's first
+  # letter + the number), NOT this stack's key: us-west-2 → usw2 and us-east-1 → use1 equal their keys, but
+  # ap-northeast-1 → apn1 while the key is apne1 (found 2026-11-11: CloudFront /r/apn1/* reached an origin serving /r/apne1/).
+  slug="$(cfg .region | sed -E 's/^([a-z]{2})-([a-z])[a-z]*-([0-9])$/\1\2\3/')"
+  [[ "$slug" =~ ^[a-z]{3}[0-9]$ ]] || die "cannot derive the live-origin slug from region '$(cfg .region)'"
   ip="$(private_ip)" || die "no private ip"; url="$(cfg .portal_internal_url)"; n="$(cfg .pool_count)"
   eng="$TOOL/engine/current"
   for ((i = 0; i < n; i++)); do pools+="mk-pool-$i "; done

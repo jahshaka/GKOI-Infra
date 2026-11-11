@@ -260,7 +260,7 @@ MCP sign-in.)
 collision — `validateRegionSlugs` / `screenRegistrations` would drop a clash); there is NO region allow-list (the api
 runs `RELAY_REGISTRY_ONLY=1`; a registry-only pool is screened only for a bad region name, a queue/slug owned by
 another region); the label comes from the box's `MEDIA_BOX_INSTANCES` entry (`REGION_LABELS` knows only Oregon +
-Frankfurt; the instance's own label wins); the HLS path is `liveOriginBase` (`https://live.gkoi.com`) + `/r/apne1/…`;
+Frankfurt; the instance's own label wins); the HLS path is `liveOriginBase` (`https://live.gkoi.com`) + `/r/apn1/…`;
 `/api/v1/app/regions` returns one row per region with a healthy, non-draining box (no cap in the engine; four rows).
 No compute variable changes. The CMS needs nothing for streaming (its `GAME_REGION_CODES` already list apne1 — game only).
 
@@ -295,12 +295,12 @@ MCP sign-in (boto3 in `run_script`); every value is created and used inside AWS,
 | 5 | `observability` | **+6**: `/gkoi/prod2/{media,game}/apne1/{container,syslog,bootstrap}` (30 days; the game ones stay empty). Output `alerts_topic_arns.apne1`. The plan FAILS if step 1 was skipped (`data.aws_sns_topic.alerts` in apne1). |
 | 6 | `data`, then `edge-alb` | **+1 each**: `aws_vpc_security_group_ingress_rule.valkey_from_peers["10.40.0.0/16"]`; `aws_vpc_security_group_ingress_rule.engine_internal_spokes["apne1"]` (tcp 3000). Nothing else. |
 | 7 | **MCP — the origin-verify secret** (below) | `gkoi/media/apne1/origin-verify` in us-west-2, 64 × `[A-Za-z0-9]` |
-| 8 | **MCP — CloudFront** (below): origin `origin-live-apne1` + behaviour `/r/apne1/*` | `InProgress` → deployed; probe → 502 (no box / no DNS yet — expected until step 9) |
+| 8 | **MCP — CloudFront** (below): origin `origin-live-apne1` + behaviour `/r/apn1/*` | `InProgress` → deployed; probe → 502 (no box / no DNS yet — expected until step 9) |
 | 9 | `media` (Path B: after the two-line edit) | Path A **+29**, Path B **+31**; 0 destroy; all under `module.box_apne1[0]` (ASG, launch template, EIP, 2 SGs + 11 ingress + 1 egress rules, role + policy + 2 attachments + profile, SSM `/gkoi/prod2/media/apne1/config`, 4 alarms, the 2 rehearsal A records; Path B also the 2 live A records `stream-apne1` + `origin-live-apne1` — new names, nothing overwritten). `data.aws_ecr_image.origin_apne1` read. **No change to the usw2 / euc1 / use1 boxes' config, ASG, records, the bundle or the Valkey/ALB rules.** The one tolerated change elsewhere: a launch template update in another region if Canonical's AMI parameter moved since the last apply (no instance refresh — the running boxes are untouched). Anything else = stop. |
 | 10 | Bring-up + test (below) | `check` exit 0 on the box; Tokyo in `/app/regions`; the scripted go-live passes |
 | 11 | `game` + `compute` plans only | **No changes** (the catalogue flag does not touch them) |
 | 12 | Path A only — the records: commit `manage_live_records = true` on apne1; `media` apply | **+2**: `module.box_apne1[0].aws_route53_record.live["stream-apne1.gkoi.com"]` + `["origin-live-apne1.gkoi.com"]` → the EIP (new names, nothing overwritten). The box still serves the rehearsal names; nothing uses the live ones yet. |
-| 13 | Path A only — the names: commit `serve_live_names = true` on apne1; `media` apply; the roll (below); at once CloudFront's `origin-live-apne1` domain → `origin-live-apne1.gkoi.com` (step 8, the re-point variant) | media: **1 change** (`aws_ssm_parameter.config`: stream/origin host). Between the roll and the CloudFront edit `/r/apne1/*` answers 502 — do them back to back, in a quiet minute (the roll drains Tokyo while it runs). |
+| 13 | Path A only — the names: commit `serve_live_names = true` on apne1; `media` apply; the roll (below); at once CloudFront's `origin-live-apne1` domain → `origin-live-apne1.gkoi.com` (step 8, the re-point variant) | media: **1 change** (`aws_ssm_parameter.config`: stream/origin host). Between the roll and the CloudFront edit `/r/apn1/*` answers 502 — do them back to back, in a quiet minute (the roll drains Tokyo while it runs). |
 
 ### Step 1 — the alerts topic in ap-northeast-1 (MCP)
 
@@ -404,7 +404,7 @@ jq --arg v "$V" --arg dom "$DOM" '.DistributionConfig
       | .CustomHeaders.Items=[{"HeaderName":"X-Origin-Verify","HeaderValue":$v}] ]
   | .Origins.Quantity = (.Origins.Items|length)
   | (.CacheBehaviors.Items[] | select(.PathPattern=="/r/usw2/*")) as $b
-  | .CacheBehaviors.Items += [ $b | .PathPattern="/r/apne1/*" | .TargetOriginId="origin-live-apne1" ]
+  | .CacheBehaviors.Items += [ $b | .PathPattern="/r/apn1/*" | .TargetOriginId="origin-live-apne1" ]
   | .CacheBehaviors.Quantity = (.CacheBehaviors.Items|length)' cf.json > new.json
 unset V
 aws cloudfront update-distribution --id $D --if-match "$ETAG" --distribution-config file://new.json --query Distribution.Status --output text
