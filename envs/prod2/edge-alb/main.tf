@@ -216,6 +216,11 @@ resource "aws_lb_listener" "https" {
   ssl_policy        = var.ssl_policy
   certificate_arn   = aws_acm_certificate_validation.alb.certificate_arn
 
+  # HSTS on every response of this listener (www / apex / labs / cdn origins, engine, files): the Lightsail host nginx
+  # used to add it; nothing did after the move (2026-11-11). No includeSubDomains / preload: stream-*, game-* and dev
+  # hosts stay unpinned. Set by hand the same day; this keeps an apply from clearing it.
+  routing_http_response_strict_transport_security_header_value = "max-age=31536000"
+
   default_action {
     type = "fixed-response"
     fixed_response {
