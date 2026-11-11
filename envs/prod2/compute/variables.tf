@@ -74,15 +74,16 @@ variable "sizes" {
     memory = number
   }))
   default = {
-    cms            = { cpu = 1024, memory = 2048 }
-    engine-api     = { cpu = 1024, memory = 2048 }
-    engine-worker  = { cpu = 1024, memory = 2048 }
-    fm-api         = { cpu = 512, memory = 1024 }
-    fm-worker      = { cpu = 512, memory = 2048 } # compose: mem_limit 1536m
-    fm-web         = { cpu = 256, memory = 512 }
-    cms-migrate    = { cpu = 512, memory = 1024 }
-    engine-migrate = { cpu = 512, memory = 1024 }
-    fm-migrate     = { cpu = 256, memory = 512 }
+    cms              = { cpu = 1024, memory = 2048 }
+    engine-api       = { cpu = 1024, memory = 2048 }
+    engine-worker    = { cpu = 1024, memory = 2048 }
+    fm-api           = { cpu = 512, memory = 1024 }
+    fm-worker        = { cpu = 512, memory = 2048 } # compose: mem_limit 1536m
+    fm-web           = { cpu = 256, memory = 512 }
+    cms-migrate      = { cpu = 512, memory = 1024 }
+    cms-content-sync = { cpu = 1024, memory = 2048 }
+    engine-migrate   = { cpu = 512, memory = 1024 }
+    fm-migrate       = { cpu = 256, memory = 512 }
   }
 }
 
@@ -144,6 +145,7 @@ variable "secrets" {
       "COMMERCE_PAYOUT_KEY",
       "RATE_LIMIT_REDIS_URL",
       "SMTP_PASS",
+      "CONTENT_SYNC_SSH_KEY",
     ]
     engine = [
       "POSTGRES_APP_PASSWORD",
@@ -311,4 +313,22 @@ variable "fm_assets_bucket" {
   description = "The file manager's assets bucket (S3_ASSETS_BUCKET). Existing, us-west-2, SSE-S3."
   type        = string
   default     = "gkoi-beta-files"
+}
+
+variable "content_sync_image" {
+  description = "The content-sync task's image (public, no ECR auth needed)."
+  type        = string
+  default     = "public.ecr.aws/docker/library/alpine:3.20"
+}
+
+variable "content_sync_host" {
+  description = "The Lightsail site box (the CMS content's source); temporary, until Lightsail is retired."
+  type        = string
+  default     = "52.24.67.48"
+}
+
+variable "content_sync_host_key" {
+  description = "The site box's SSH host key line (known_hosts format); public."
+  type        = string
+  default     = "52.24.67.48 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL9XanMB8BekTf1He1rSTstBKMuyU0kVXZtyacMMhvlX"
 }

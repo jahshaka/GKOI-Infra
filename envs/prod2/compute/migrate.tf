@@ -35,11 +35,50 @@ locals {
     logConfiguration = local.awslogs["fm-migrate"]
   })
 
+  # One-off: copy the CMS content from the Lightsail site box onto EFS (C11). rsync over SSH with a key the box
+  # restricts to `rrsync -ro /opt/aisolver-www/content` (read-only, that one directory). Run with `ecs run-task`;
+  # the final sync in the P4 window adds the override RSYNC_DELETE=1. Files land as the access point's uid/gid (33).
+  cms_content_sync = {
+    name         = "sync"
+    image        = var.content_sync_image
+    essential    = true
+    portMappings = []
+    entryPoint   = ["sh", "-c"]
+    command = [<<-EOS
+      set -eu
+      apk add --no-cache rsync openssh-client >/dev/null
+      umask 077; mkdir -p /root/.ssh
+      printf '%s\n' "$SYNC_SSH_KEY" > /root/.ssh/id; chmod 600 /root/.ssh/id
+      printf '%s\n' "$SYNC_HOST_KEY" > /root/.ssh/known_hosts
+      extra=""; if [ "$${RSYNC_DELETE:-0}" = 1 ]; then extra="--delete"; fi
+      echo "content-sync: start (delete=$${RSYNC_DELETE:-0})"
+      rsync -rlt --omit-dir-times --no-perms --no-owner --no-group --partial --stats $extra \
+        -e "ssh -i /root/.ssh/id -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes -o ServerAliveInterval=30" \
+        "root@$SYNC_HOST:/" /data/content/ | tail -n 20
+      echo "content-sync: files on EFS: $(find /data/content -type f | wc -l)"
+      echo "CONTENT_SYNC_OK"
+    EOS
+    ]
+    environment = [
+      { name = "SYNC_HOST", value = var.content_sync_host },
+      { name = "SYNC_HOST_KEY", value = var.content_sync_host_key },
+    ]
+    secrets          = [{ name = "SYNC_SSH_KEY", valueFrom = local.secret_arn["cms/CONTENT_SYNC_SSH_KEY"] }]
+    mountPoints      = [{ sourceVolume = "content", containerPath = "/data/content", readOnly = false }]
+    logConfiguration = merge(local.awslogs["cms-migrate"], { options = merge(local.awslogs["cms-migrate"].options, { awslogs-stream-prefix = "cms-content-sync" }) })
+  }
+
   migrate_tasks = {
     cms-migrate = {
       container = local.cms_migrate
       exec_role = aws_iam_role.exec["cms"].arn
       task_role = aws_iam_role.task["cms"].arn # the content mount (a migration may seed files)
+      efs       = true
+    }
+    cms-content-sync = {
+      container = local.cms_content_sync
+      exec_role = aws_iam_role.exec["cms"].arn
+      task_role = aws_iam_role.task["cms"].arn
       efs       = true
     }
     engine-migrate = {
