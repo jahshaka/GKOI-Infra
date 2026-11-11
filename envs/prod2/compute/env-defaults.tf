@@ -36,6 +36,7 @@ locals {
     CMS_CONTENT_DIR     = "/data/content"
     LABS_COUNTRY_HEADER = "cloudfront"
     LABS_HOST           = "labs.gkoi.com"
+    LABS_ORIGIN_HOST    = "origin-labs.gkoi.com" # the labs CDN sends this Host (audit B4-3; CMS 9d222b28)
     CSP_CDN_ORIGIN      = "https://cdn.gkoi.com"
     CSP_LIVE_CDN_ORIGIN = "https://live.gkoi.com"
     PRODUCT_NAME        = "GKOI"
