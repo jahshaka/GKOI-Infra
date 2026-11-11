@@ -20,7 +20,7 @@ variable "zone_id" {
 
 variable "media_regions" {
   description = <<-EOT
-    Per media region (usw2 / euc1 / use1; the key is the live-origin slug = regionSlug(region)):
+    Per media region (usw2 / euc1 / use1 / apne1; the key is the live-origin slug = regionSlug(region)):
       enabled               create the region's box (ASG, EIP, SGs, role, config, rehearsal records, alarms)
       label                 the region's name in the app (the engine's MEDIA_BOX_INSTANCES `label`)
       rehearsal_stream_host NEW name for RTMPS ingest while the box is proven privately (A record → the EIP, created)
@@ -90,10 +90,23 @@ variable "media_regions" {
       serve_live_names      = true
       manage_live_records   = true
     }
+    # Tokyo (2026-11-11, media only — README "Adding Tokyo (apne1)"): on the rehearsal names (Path A); the live names are
+    # later commits (manage_live_records, then serve_live_names + roll.sh) — or both true before the first apply (Path B,
+    # recommended: the engine is live, so the region is public either way). us-east-1 and ap-northeast-1
+    # have no built-in label in the engine (REGION_LABELS knows Oregon + Frankfurt): the label here is what the app shows.
+    apne1 = {
+      enabled               = true
+      label                 = "Tokyo"
+      rehearsal_stream_host = "stream-apne1-p2.gkoi.com"
+      rehearsal_origin_host = "origin-live-apne1-p2.gkoi.com"
+      live_stream_host      = "stream-apne1.gkoi.com"
+      live_origin_host      = "origin-live-apne1.gkoi.com"
+      origin_verify_secret  = "gkoi/media/apne1/origin-verify"
+    }
   }
   validation {
-    condition     = alltrue([for k, v in var.media_regions : contains(["usw2", "euc1", "use1"], k)])
-    error_message = "media_regions keys are usw2, euc1, use1 (apne1 needs its provider + module block first)."
+    condition     = alltrue([for k, v in var.media_regions : contains(["usw2", "euc1", "use1", "apne1"], k)])
+    error_message = "media_regions keys are usw2, euc1, use1, apne1 (another region needs its provider + module block first)."
   }
   validation {
     condition     = alltrue([for v in values(var.media_regions) : v.pool_count >= 1 && v.pool_count <= 5])

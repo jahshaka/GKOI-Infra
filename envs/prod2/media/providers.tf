@@ -28,5 +28,9 @@ provider "aws" {
   default_tags { tags = local.tags }
 }
 
-# Tokyo (apne1) is PAUSED in modules/regions: when it is enabled, add its provider + a module "box_apne1" block here
-# (copy box_use1) and an `apne1` entry in var.media_regions.
+provider "aws" {
+  alias               = "apne1"
+  region              = "ap-northeast-1"
+  allowed_account_ids = [var.account_id]
+  default_tags { tags = local.tags }
+}

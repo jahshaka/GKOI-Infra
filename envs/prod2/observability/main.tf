@@ -75,7 +75,7 @@ module "logs_use1" {
   alerts_topic_name = var.alerts_topic_name
 }
 
-# Tokyo has no gkoi-ops-alerts topic today: create it before enabling apne1 (README "Enabling a paused region").
+# Tokyo's gkoi-ops-alerts topic is made by hand before this stack is applied with apne1 on (media README "Adding Tokyo").
 module "logs_apne1" {
   source            = "../../../modules/region-log-groups"
   count             = local.r.apne1.enabled ? 1 : 0

@@ -230,12 +230,30 @@ run "live_records_need_live_names" {
   expect_failures = [var.game_regions]
 }
 
-run "tokyo_paused_in_catalogue" {
+# modules/regions enabled apne1 on 2026-11-11 (a Tokyo MEDIA box): the game box stays OFF by default (the default run
+# above asserts box_apne1 == 0); turning it on is only game_regions.apne1.enabled once its VPC exists.
+run "tokyo_game_box_when_asked" {
   command = plan
   variables {
     game_regions = { apne1 = { enabled = true } }
   }
-  expect_failures = [terraform_data.preflight]
+  override_data {
+    target = data.terraform_remote_state.network
+    values = {
+      outputs = {
+        regions = {
+          usw2  = { cidr = "10.10.0.0/16", vpc_id = "vpc-home", public_subnet_ids = ["subnet-a", "subnet-b"] }
+          euc1  = { cidr = "10.20.0.0/16", vpc_id = "vpc-euc1", public_subnet_ids = ["subnet-c", "subnet-d"] }
+          use1  = { cidr = "10.30.0.0/16", vpc_id = "vpc-use1", public_subnet_ids = ["subnet-e", "subnet-f"] }
+          apne1 = { cidr = "10.40.0.0/16", vpc_id = "vpc-apne1", public_subnet_ids = ["subnet-g", "subnet-h"] }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = length(module.box_apne1) == 1 && length(module.box_usw2) == 0
+    error_message = "apne1 game box only when asked"
+  }
 }
 
 run "max_one_box" {

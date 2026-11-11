@@ -9,7 +9,7 @@ variable "state_bucket" {
 }
 
 variable "alerts_topic_name" {
-  description = "The EXISTING per-region SNS topic (usw2 / euc1 / use1). Not managed here."
+  description = "The EXISTING per-region SNS topic (usw2 / euc1 / use1 / apne1 — each made by hand). Not managed here."
   type        = string
   default     = "gkoi-ops-alerts"
 }

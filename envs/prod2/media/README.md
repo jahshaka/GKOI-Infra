@@ -1,12 +1,13 @@
 # `envs/prod2/media` — the GKOI media boxes on EC2 (P5)
 
 PLAN-AWS-MIGRATION-PROD2-V1 §P5. One ASG of ONE EC2 instance per enabled region (`var.media_regions`: usw2 / euc1 /
-use1; Tokyo needs a provider + module block first), each running the media agent, N MediaMTX relay pools and the
+use1 / apne1 — Tokyo added 2026-11-11, "Adding Tokyo (apne1)" below), each running the media agent, N MediaMTX relay pools and the
 regional live origin, and **registering its pools with the engine** (SPEC-ENGINE-DYNAMIC-REGIONS-V1 C1:
 `MEDIA_BOX_INSTANCES`, no `RELAY_POOL_INSTANCES` entry). Per the 2026-11-11 gap audit (B3-2/B3-3) the media plane moves
 **with** the engine: these boxes are brought up and proven privately first, then ONE window flips engine + FM + media.
 
-State: `prod2/media/terraform.tfstate`. Defaults: all three regions enabled (operator ruling: three regions, one box each).
+State: `prod2/media/terraform.tfstate`. Defaults: all four regions enabled, one box each (three by the P5 ruling; Tokyo
+added 2026-11-11, media only).
 
 ## What an apply creates
 
@@ -39,7 +40,8 @@ group `gkoi-prod2-engine-api-int`, its SG admitting every peered edge VPC on 300
   inherits a departed box's pool ids — A2/A4 re-claim or end those sessions), pool ids `<box>-p<i>`, its own queue
   `relay-box-<box>`. `MEDIA_BOX_INSTANCES` is rendered on the box from IMDS (private IP = `apiHost`) and the config:
   `publicHost` = the stream host, ports `(i+1)1935/1936/8888/8889/9997` and ICE `8189+100·i` exactly as the live box,
-  `liveOriginBase https://live.gkoi.com`, `label` Oregon / Frankfurt / Virginia (us-east-1 has no built-in label).
+  `liveOriginBase https://live.gkoi.com`, `label` Oregon / Frankfurt / Virginia / Tokyo (the engine's built-in `REGION_LABELS` knows only us-west-2 + eu-central-1;
+  the config's `label` wins for every region).
 - **How a box reaches the engine (`PORTAL_INTERNAL_URL`).** The agent calls `/internal/**` (publish-auth on every
   publish, ingest heartbeats, session state/health, vod events). The public path cannot carry it: the engine edge
   (ECS sidecar, same `edge.conf.template`) answers `/internal/` with 404. Service Connect serves ECS clients only;
@@ -212,21 +214,261 @@ reaches a running box the same way (every file is sha256-checked against the con
   per box (a pool of EIPs, or public IPs + per-box stream hosts), `publicHost` per box, the origin behind an NLB/ALB
   per region (C5), the validation `max ≤ 1` lifted. Not built (operator: server counts min/max 1 for now).
 
+## Adding Tokyo (apne1) — 2026-11-11
+
+A FOURTH media region: `ap-northeast-1`, key `apne1`, label "Tokyo", ONE `m7i.xlarge` box. Streaming only: the game
+stack keeps `game_regions.apne1.enabled = false` (its plan stays "No changes").
+
+What this branch changes: `modules/regions` (apne1 enabled → network / registry / observability create their apne1
+parts, which were already written behind the flag), this stack (provider `aws.apne1`, `data.aws_ecr_image.origin_apne1`,
+`module.box_apne1`, the `apne1` default — rehearsal names first — and `apne1` allowed by the `media_regions` validation),
+the tests. `data` and `edge-alb` need NO edit: both read network's `edge_cidrs`, so a re-apply adds 10.40.0.0/16.
+
+**Facts read 2026-11-11 (read-only):** Running On-Demand Standard vCPU quota in ap-northeast-1 = **640** (L-1216C47A; a
+request for 64 is `CASE_CLOSED` — not 5: the box's 4 vCPUs fit with room for a game box); nothing runs there (no
+instance, ASG, EIP, ECS cluster, log group, peering; only the default VPC 172.31/16); the Canonical 24.04 SSM parameter
+resolves there (`ami-0830d2e7c1f17b903`); `m7i.xlarge` is offered in 1a / 1c / 1d (the VPC takes the first two, 1a + 1c);
+none of `stream-apne1[-p2]` / `origin-live-apne1[-p2]` `.gkoi.com` exists in the zone; no SNS topic in ap-northeast-1;
+the secret `gkoi/media/apne1/origin-verify` does not exist; ECR replication = euc1 + use1 only, no repository in
+ap-northeast-1. (`gkoi-aws service-quotas get-service-quota` is DENIED for the orchestrator role — read through the
+MCP sign-in.)
+
+**The engine needs nothing** (checked at f997524): `regionSlug("ap-northeast-1")` = `apne1` (`liveOrigin.ts`; no
+collision — `validateRegionSlugs` / `screenRegistrations` would drop a clash); there is NO region allow-list (the api
+runs `RELAY_REGISTRY_ONLY=1`; a registry-only pool is screened only for a bad region name, a queue/slug owned by
+another region); the label comes from the box's `MEDIA_BOX_INSTANCES` entry (`REGION_LABELS` knows only Oregon +
+Frankfurt; the instance's own label wins); the HLS path is `liveOriginBase` (`https://live.gkoi.com`) + `/r/apne1/…`;
+`/api/v1/app/regions` returns one row per region with a healthy, non-draining box (no cap in the engine; four rows).
+No compute variable changes. The CMS needs nothing for streaming (its `GAME_REGION_CODES` already list apne1 — game only).
+
+**READ THIS FIRST — there is no private bring-up any more.** The engine is LIVE. The moment the Tokyo agent registers
+(seconds after the box's containers start) `/api/v1/app/regions` offers "Tokyo" to every GKOI Live app, and the apps'
+region probe sends nearby streamers there. A drained box is hidden, but a drained box also refuses placement, so it
+cannot be tested drained. And while the box serves the REHEARSAL names, CloudFront cannot reach it under the live
+origin name: the origin nginx presents the certificate of the name it serves (`server_name` + lineage of
+`MEDIA_ORIGIN_HOST`), so an origin `origin-live-apne1.gkoi.com` would fail TLS (502) — viewers of a Tokyo stream would
+see nothing. Two ways, pick one BEFORE step 9:
+
+- **Path A (as briefed): rehearsal names first.** The defaults in this branch. CloudFront's new origin then points at
+  `origin-live-apne1-p2.gkoi.com` (step 8) and is re-pointed at the switch (steps 12–13). One extra roll + CloudFront edit.
+- **Path B (recommended): live names from the first boot.** Both live names are NEW (nothing to take over, as use1):
+  in `variables.tf` set `serve_live_names = true` + `manage_live_records = true` on apne1 in the same commit before
+  step 9; CloudFront points at `origin-live-apne1.gkoi.com` once (step 8); no steps 12–13, no roll. The test (step 10) is the
+  same; the region is public from step 9 either way.
+
+Either way, do steps 1–8 first, so that the region works end to end the moment it appears. If the test fails: drain
+it at once (step 10's "stop" line), fix, undrain.
+
+Runner: `tools/gkoi-infra-run <stack> plan` → read the summary → `tools/gkoi-infra-run <stack> apply` (from a clean
+checkout of the merged commit). "MCP" = a step the orchestrator role (`gkoi-aws`) may NOT do — run it through the AWS
+MCP sign-in (boto3 in `run_script`); every value is created and used inside AWS, never printed.
+
+| # | Step | Expect |
+|---|---|---|
+| 1 | **MCP — the alerts topic** (below) | `arn:aws:sns:ap-northeast-1:127214190346:gkoi-ops-alerts`, one email subscription (pending until confirmed) |
+| 2 | `network` | **+28, 0 change, 0 destroy**: `module.vpc_apne1[0]` (VPC 10.40/16, IGW, 4 subnets, 3 route tables + 4 associations, the IGW route, S3 gateway endpoint, flow log + `/gkoi/prod2/vpc-flow/apne1`, the locked default SG = 18) + `module.peer_apne1[0]` (peering + accepter + 2 options + 6 routes: 10.40/16 in usw2's 3 route tables, 10.10/16 in apne1's 3 = 10). No change to usw2 / euc1 / use1 resources. |
+| 3 | `registry` | **+1, 1 change, 0 destroy**: `module.template_apne1[0].aws_ecr_repository_creation_template.this`; `aws_ecr_replication_configuration.this[0]` gains the ap-northeast-1 destination (update in place) |
+| 4 | **MCP — ECR backfill** (below): replication copies NEW pushes only | the three images in ap-northeast-1 with the source digests |
+| 5 | `observability` | **+6**: `/gkoi/prod2/{media,game}/apne1/{container,syslog,bootstrap}` (30 days; the game ones stay empty). Output `alerts_topic_arns.apne1`. The plan FAILS if step 1 was skipped (`data.aws_sns_topic.alerts` in apne1). |
+| 6 | `data`, then `edge-alb` | **+1 each**: `aws_vpc_security_group_ingress_rule.valkey_from_peers["10.40.0.0/16"]`; `aws_vpc_security_group_ingress_rule.engine_internal_spokes["apne1"]` (tcp 3000). Nothing else. |
+| 7 | **MCP — the origin-verify secret** (below) | `gkoi/media/apne1/origin-verify` in us-west-2, 64 × `[A-Za-z0-9]` |
+| 8 | **MCP — CloudFront** (below): origin `origin-live-apne1` + behaviour `/r/apne1/*` | `InProgress` → deployed; probe → 502 (no box / no DNS yet — expected until step 9) |
+| 9 | `media` (Path B: after the two-line edit) | Path A **+29**, Path B **+31**; 0 destroy; all under `module.box_apne1[0]` (ASG, launch template, EIP, 2 SGs + 11 ingress + 1 egress rules, role + policy + 2 attachments + profile, SSM `/gkoi/prod2/media/apne1/config`, 4 alarms, the 2 rehearsal A records; Path B also the 2 live A records `stream-apne1` + `origin-live-apne1` — new names, nothing overwritten). `data.aws_ecr_image.origin_apne1` read. **No change to the usw2 / euc1 / use1 boxes' config, ASG, records, the bundle or the Valkey/ALB rules.** The one tolerated change elsewhere: a launch template update in another region if Canonical's AMI parameter moved since the last apply (no instance refresh — the running boxes are untouched). Anything else = stop. |
+| 10 | Bring-up + test (below) | `check` exit 0 on the box; Tokyo in `/app/regions`; the scripted go-live passes |
+| 11 | `game` + `compute` plans only | **No changes** (the catalogue flag does not touch them) |
+| 12 | Path A only — the records: commit `manage_live_records = true` on apne1; `media` apply | **+2**: `module.box_apne1[0].aws_route53_record.live["stream-apne1.gkoi.com"]` + `["origin-live-apne1.gkoi.com"]` → the EIP (new names, nothing overwritten). The box still serves the rehearsal names; nothing uses the live ones yet. |
+| 13 | Path A only — the names: commit `serve_live_names = true` on apne1; `media` apply; the roll (below); at once CloudFront's `origin-live-apne1` domain → `origin-live-apne1.gkoi.com` (step 8, the re-point variant) | media: **1 change** (`aws_ssm_parameter.config`: stream/origin host). Between the roll and the CloudFront edit `/r/apne1/*` answers 502 — do them back to back, in a quiet minute (the roll drains Tokyo while it runs). |
+
+### Step 1 — the alerts topic in ap-northeast-1 (MCP)
+
+The three existing topics were made by hand (P0): policy = CloudWatch / Budgets / EventBridge may publish (source
+account), the account root may manage; tag `project=gkoi`; one email subscription. Same here, copied from us-west-2:
+
+```python
+src = "arn:aws:sns:us-west-2:127214190346:gkoi-ops-alerts"
+dst = "arn:aws:sns:ap-northeast-1:127214190346:gkoi-ops-alerts"
+pol = (await call_boto3(service_name="sns", operation_name="GetTopicAttributes", region_name="us-west-2",
+                        params={"TopicArn": src}))["Attributes"]["Policy"].replace(src, dst)
+t = await call_boto3(service_name="sns", operation_name="CreateTopic", region_name="ap-northeast-1",
+                     params={"Name": "gkoi-ops-alerts", "Attributes": {"Policy": pol}, "Tags": [{"Key": "project", "Value": "gkoi"}]})
+subs = await call_boto3(service_name="sns", operation_name="ListSubscriptionsByTopic", region_name="us-west-2", params={"TopicArn": src})
+n = 0
+for x in subs["Subscriptions"]:
+    if x["Protocol"] == "email":
+        await call_boto3(service_name="sns", operation_name="Subscribe", region_name="ap-northeast-1",
+                         params={"TopicArn": t["TopicArn"], "Protocol": "email", "Endpoint": x["Endpoint"]})
+        n += 1
+result = {"topic": t["TopicArn"], "email_subscriptions_requested": n}
+result
+```
+
+The address then gets a confirmation mail. **Note:** on 2026-11-11 the email subscription of EVERY existing
+`gkoi-ops-alerts` topic (usw2, euc1, use1) is still `PendingConfirmation` — no alarm reaches anyone today.
+
+### Step 4 — the images in ap-northeast-1 (MCP: `ecr:StartReplicationBackfill`)
+
+ECR replicates only images pushed AFTER a destination is configured ("Only repository content pushed or restored to a
+repository after replication is configured is replicated" — ECR user guide, Private image replication). The existing
+images reach a new destination through a **replication backfill** (one per destination; it copies every image that
+matches the CURRENT rules — `gkoi/*`: 17 repos, ~2.2 GB on 2026-11-11 ≈ $0.22/month of replica storage; tags come with
+the images, so `gkoi/ci-nginx:1.27-alpine` resolves there). After step 3:
+
+```bash
+aws ecr start-replication-backfill --region us-west-2 --registry-id 127214190346 \
+  --destination region=ap-northeast-1,registryId=127214190346          # → replicationBackfillId
+aws ecr list-replication-backfills --region us-west-2 --registry-id 127214190346   # until COMPLETE (minutes)
+# then (gkoi-aws may read ECR):
+for r in gkoi/media-agent gkoi/mediamtx gkoi/ci-nginx; do
+  gkoi-aws ecr describe-images --region ap-northeast-1 --repository-name "$r" \
+    --query 'imageDetails[].[imageDigest,join(`,`,imageTags)]' --output text; done
+```
+
+Expect exactly (`releases/mikaido.json` gkoi-2026.11.11-1 + the mirror):
+`gkoi/media-agent sha256:0ca2d707ab6dd37ea0b9447322413bfe198d27e523d6a2e810f8f4e0f0313c3a`,
+`gkoi/mediamtx sha256:2dfc8522735bfbbe1b3be4eba71074a8e3685a86dfa8ca56e6b80de5bf63afa1`,
+`gkoi/ci-nginx sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8 1.27-alpine`.
+The media plan resolves ci-nginx by tag in apne1 and STOPS if it is missing; media-agent / mediamtx are pulled by digest
+at boot (a missing replica fails the box's `phase pull`, not the plan). The replicas get the creation template of step 3
+(immutable, keep 20) only if step 3 is applied BEFORE the backfill.
+
+(Without the backfill API: push a NEW tag of each image in us-west-2 — `batch-get-image` → `put-image` with the same
+manifest and a tag such as `<tag>-apne1` — which replicates to every destination; ci-nginx would then need
+`media_origin_image_tag` changed for all regions. The backfill is simpler.)
+
+### Step 7 — the origin-verify secret (MCP; the value is generated by Secrets Manager and never printed)
+
+`gkoi/media/{usw2,euc1,use1}/origin-verify` were made by hand in P0: us-west-2, the default `aws/secretsmanager` key,
+a plain string, tags `project=gkoi` + `phase`, description "X-Origin-Verify for the <region> media origin …". The origin
+entrypoint and edge-alb accept `[A-Za-z0-9_-]{32,128}`; 64 alphanumerics as the others:
+
+```python
+pw = await call_boto3(service_name="secretsmanager", operation_name="GetRandomPassword", region_name="us-west-2",
+                      params={"PasswordLength": 64, "ExcludePunctuation": True, "IncludeSpace": False, "RequireEachIncludedType": True})
+r = await call_boto3(service_name="secretsmanager", operation_name="CreateSecret", region_name="us-west-2", params={
+    "Name": "gkoi/media/apne1/origin-verify",
+    "Description": "X-Origin-Verify for the ap-northeast-1 media origin (new 2026-11-11)",
+    "SecretString": pw["RandomPassword"],
+    "Tags": [{"Key": "project", "Value": "gkoi"}, {"Key": "phase", "Value": "P5"}]})
+pw = None
+result = {"arn": r["ARN"]}
+result
+```
+
+(CLI, any shell that may: `aws secretsmanager create-secret --region us-west-2 --name gkoi/media/apne1/origin-verify
+--description "…" --tags Key=project,Value=gkoi Key=phase,Value=P5 --secret-string "$(aws secretsmanager
+get-random-password --region us-west-2 --password-length 64 --exclude-punctuation --no-include-space
+--require-each-included-type --query RandomPassword --output text)"`.) Check without printing:
+`… get-secret-value … --query SecretString --output text | tr -d '\n' | grep -cE '^[A-Za-z0-9]{64}$'` → `1`.
+The box role reads it by ARN (this stack's `data.aws_secretsmanager_secret.origin_verify["apne1"]` — the media plan
+STOPS without it); the rehearsal driver gets it as `ORIGIN_VERIFY_APNE1` once the rehearsal stack is re-applied.
+
+### Step 8 — CloudFront `live.gkoi.com` (E18952ZBU48RL9, hand-managed; MCP for the secret read)
+
+Read 2026-11-11: origins `origin-live-usw2` / `-euc1` / `-use1` / `origin-live` (default), each https-only TLSv1.2 with
+Origin Shield in its region and a 64-char `X-Origin-Verify`; behaviours `/r/{euc1,usw2,use1}/*` with cache policy
+`gkoi-live-hls` (79d102a8…), origin request `gkoi-live-viewer` (a565c3fd…), response `gkoi-live-cors` (8f657904…);
+PriceClass_All (Asian edges included). The use1 script (GKOIBuilder_AI `docs/specs/RUNBOOK-AWS-P3-P5-WINDOW.md` §1.7) for
+apne1 — `DOM` = `origin-live-apne1-p2.gkoi.com` on Path A, `origin-live-apne1.gkoi.com` on Path B:
+
+```bash
+D=E18952ZBU48RL9; DOM=origin-live-apne1.gkoi.com; W=$(mktemp -d); chmod 700 "$W"; cd "$W"
+aws cloudfront get-distribution-config --id $D > cf.json; ETAG=$(jq -r .ETag cf.json)
+V=$(aws secretsmanager get-secret-value --region us-west-2 --secret-id gkoi/media/apne1/origin-verify --query SecretString --output text)
+jq --arg v "$V" --arg dom "$DOM" '.DistributionConfig
+  | (.Origins.Items[] | select(.Id=="origin-live-usw2")) as $o
+  | .Origins.Items += [ $o | .Id="origin-live-apne1" | .DomainName=$dom
+      | .OriginShield={"Enabled":true,"OriginShieldRegion":"ap-northeast-1"}
+      | .CustomHeaders.Items=[{"HeaderName":"X-Origin-Verify","HeaderValue":$v}] ]
+  | .Origins.Quantity = (.Origins.Items|length)
+  | (.CacheBehaviors.Items[] | select(.PathPattern=="/r/usw2/*")) as $b
+  | .CacheBehaviors.Items += [ $b | .PathPattern="/r/apne1/*" | .TargetOriginId="origin-live-apne1" ]
+  | .CacheBehaviors.Quantity = (.CacheBehaviors.Items|length)' cf.json > new.json
+unset V
+aws cloudfront update-distribution --id $D --if-match "$ETAG" --distribution-config file://new.json --query Distribution.Status --output text
+shred -u cf.json new.json; aws cloudfront wait distribution-deployed --id $D
+```
+
+Path A's step 13 (re-point): the same, but `| (.Origins.Items[] | select(.Id=="origin-live-apne1") | .DomainName) = $dom`
+instead of the two `+=` blocks (the header stays). Check after the box is up (from anywhere):
+`curl -s -o /dev/null -w '%{http_code}\n' https://live.gkoi.com/r/apne1/live/nosuch/hls/index.m3u8` → **404** (origin
+reached with the right header, unknown session). 403 = wrong header; 502/504 = DNS / certificate / name mismatch.
+(The orchestrator role has `cloudfront:UpdateDistribution` but not `secretsmanager:GetSecretValue`: run it where both are allowed.)
+
+### Step 10 — bring-up and the test
+
+1. The ASG launches; bootstrap ~5–8 min (packages, 4 certs by DNS-01, the cross-region pulls from apne1's ECR, the bundle
+   + engine `source.zip` from the us-west-2 bucket — S3 is global, the box has a public IP, no NAT needed). Follow
+   `/gkoi/prod2/media/apne1/bootstrap` (ap-northeast-1), or over SSM: `sudo /opt/gkoi-media/media-bootstrap.sh check` → exit 0.
+2. The engine: `engine-api` logs show no "dropped registration"; through the app API (a brokered device token)
+   `GET https://engine.gkoi.com/api/v1/app/regions` lists `{region: ap-northeast-1, label: Tokyo, probeHost:
+   stream-apne1[-p2].gkoi.com, probePort: 11936}`. **From here Tokyo is public.**
+3. **The scripted go-live — the rehearsal driver, apne1 only, against the LIVE engine.** It cannot run in rehearsal
+   mode (media's `rehearsal = true` is global and refused while any region serves live names; compute's would move the
+   live engine onto the scratch bucket). It can run UN-armed for one region:
+   - Let the driver reach the origin: in this stack set `origin_ingress_cidrs = ["32.189.104.202/32"]` on apne1 only
+     (the home NAT — 443 from it, besides CloudFront) and apply `media` (+1 SG rule).
+   - `tools/gkoi-infra-run rehearsal apply --allow-destroy` — the task definition is REPLACED (its `REGIONS` gains
+     apne1, the secret `ORIGIN_VERIFY_APNE1`); nothing else should change.
+   - `tools/gkoi-rehearsal --only apne1 --force --dry-run` → the RunTask request; add
+     `{"name":"SKIP_BUCKET","value":"1"}` to its `containerOverrides[0].environment` (the recording lands in the LIVE
+     `gkoi-beta-vods`, not the scratch bucket); run it with an `ecs:RunTask` + `iam:PassRole` credential (MCP) and follow
+     the log (rehearsal README step 8). PASS = the session placed in ap-northeast-1 with ingest
+     `rtmps://stream-apne1[-p2].gkoi.com:11936`, publishing, LL-HLS through the origin (with and without the header),
+     through the engine's watch proxy (Oregon → Tokyo over peering), the recording available, thumbnails, the MP4.
+   - It writes to the LIVE engine database: the identity `rehearsal-p2-driver` (JIT account), its brokered devices
+     (revoked by the driver), one ended session and its recording in `gkoi-beta-vods`. Delete them after (`DELETE
+     /api/v1/vods/:id` as that identity, then the account), and remove `origin_ingress_cidrs` again (apply `media`).
+   - Not verified offline: that the un-armed driver still passes the broker routes against the post-window engine
+     (it last ran before P3/P4). Alternative: a manual go-live as a real test account with the orchestrator's app-link
+     tooling (`mintlink-prod`, GKOIBuilder_AI `scripts/session-tools/`) and a GKOI Live build or ffmpeg to the ingest
+     URL the 201 returns, as in the P3 verification; then watch it on the site (`live.gkoi.com/r/apne1/…`).
+4. Plus what the driver does not cover: a WHEP preview (ICE udp 8189), a viewer through `live.gkoi.com` (step 8's
+   probe with a real session id), the app's own region probe choosing Tokyo from Asia.
+5. **Stop line:** any failure → drain at once (hides the region from `/app/regions` within seconds and stops placement):
+   over SSM `docker exec <agent> …/drain` POST (README "Bring one region up" step 6), or the engine admin
+   `POST /api/v1/admin/media/boxes/<box>/drain {draining:true}`. Undrain after the fix. Full retreat: `enabled = false`
+   on apne1 and apply `media` (the rehearsal-name records go; live records on Path B have `prevent_destroy` — the
+   Rollback section's `state rm` first).
+
+### Step 13 on Path A — the roll
+
+```bash
+aws ssm send-command --region ap-northeast-1 --document-name AWS-RunShellScript \
+  --targets Key=tag:aws:autoscaling:groupName,Values=gkoi-prod2-media-apne1 \
+  --parameters 'commands=["/opt/gkoi-media/roll.sh --drain-wait 60"]' --timeout-seconds 7200
+```
+
+(re-renders `publicHost` = `stream-apne1.gkoi.com`, the pools' cert path, the origin's server name + lineage; the
+live-name certs were issued at first boot). Then the CloudFront re-point at once. The orchestrator role may
+`ssm:SendCommand`.
+
+### Cost (Tokyo, per month)
+
+Box ~$210 (table above). Elsewhere: flow logs into `/gkoi/prod2/vpc-flow/apne1` (ingestion ~$0.76/GB in Tokyo); the
+alarms ~$0.40; ECR replicas ~$0.22 now (+ every future `gkoi/*` image also lands in Tokyo); Origin Shield in
+ap-northeast-1 (per-request fee). Traffic (list prices from memory): a recording uploaded Tokyo → the us-west-2 bucket
+and the Valkey / internal-ALB calls cross the peering at ~$0.09/GB (APAC inter-region — not the $0.02 of the US/EU
+regions): ≈ $0.24 per recorded 6 Mb/s stream-hour; platform relays leave Tokyo at $0.114/GB (first 10 TB; Pricing
+API) ≈ $0.31 per platform per stream-hour; EC2 → CloudFront free. **≈ $215/month + traffic**; the four regions ≈
+$750/month (the plan budgeted ~$650 for four). Latency: Tokyo → Oregon is ~100 ms per round trip for the publish-auth,
+the 5-s heartbeats and the BullMQ calls to Valkey (G4: keep-alive set; G5's regional api would remove it).
+
 ## Validate (offline)
 
 `terraform fmt -check`, `validate` (`init -backend=false`) and `terraform test` (tests/plan.tftest.hcl: mock providers,
-no AWS call — three regions, the default, a bad pool count, the live-records switch) in `hashicorp/terraform:1.9`;
+no AWS call — three regions, the default four, Tokyo's defaults + its live-name switch, an unknown region key, a bad pool
+count, the live-records switch, the rehearsal switch; the runs share one state, so their ORDER matters — see the file) in `hashicorp/terraform:1.9`;
 `shellcheck -x` over `box/*.sh` (and the rendered user-data) in `koalaman/shellcheck`.
 
 ## Cost (on-demand list prices from memory, per month, one box per region)
 
-| Item | usw2 | euc1 | use1 |
-|---|---|---|---|
-| m7i.xlarge | ~$147 | ~$168 | ~$147 |
-| gp3 100 GiB | ~$8 | ~$9.5 | ~$8 |
-| Elastic IP (public IPv4) | ~$3.6 | ~$3.6 | ~$3.6 |
-| CloudWatch: ~20 agent metrics (ASG + instance aggregations) + 4 alarms + log ingestion | ~$7 + logs | ~$7 + logs | ~$7 + logs |
-| **Region** | **~$166** | **~$188** | **~$166** |
+| Item | usw2 | euc1 | use1 | apne1 |
+|---|---|---|---|---|
+| m7i.xlarge | ~$147 | ~$168 | ~$147 | **$190** ($0.2604/h, Pricing API 2026-11-11) |
+| gp3 100 GiB | ~$8 | ~$9.5 | ~$8 | $9.6 ($0.096/GB-mo, Pricing API) |
+| Elastic IP (public IPv4) | ~$3.6 | ~$3.6 | ~$3.6 | ~$3.6 |
+| CloudWatch: ~20 agent metrics (ASG + instance aggregations) + 4 alarms + log ingestion | ~$7 + logs | ~$7 + logs | ~$7 + logs | ~$7 + logs (Tokyo ingestion ~$0.76/GB) |
+| **Region** | **~$166** | **~$188** | **~$166** | **~$210** |
 
 Once (in edge-alb): the internal ALB ~$16.4 + LCUs (~$5) ≈ **$22**. All three ≈ **$540/month** (+ egress: platform relays
 $0.09/GB ≈ $0.24 per platform per stream-hour at 6 Mb/s; a spoke's recording upload to the us-west-2 bucket and its

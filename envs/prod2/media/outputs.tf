@@ -3,6 +3,7 @@ locals {
     length(module.box_usw2) > 0 ? { usw2 = module.box_usw2[0] } : {},
     length(module.box_euc1) > 0 ? { euc1 = module.box_euc1[0] } : {},
     length(module.box_use1) > 0 ? { use1 = module.box_use1[0] } : {},
+    length(module.box_apne1) > 0 ? { apne1 = module.box_apne1[0] } : {},
   )
 }
 

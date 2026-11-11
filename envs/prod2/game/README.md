@@ -1,7 +1,7 @@
 # `envs/prod2/game` — the War Room GAME servers on EC2 ASGs (P6)
 
 PLAN-AWS-MIGRATION-PROD2-V1 §P6 (+ R2). One ASG of ONE EC2 instance per enabled region (`var.game_regions`: usw2 /
-euc1 / use1 on, apne1 defined and OFF — Tokyo waits for its quota and `modules/regions`), each running the War Room game
+euc1 / use1 on, apne1 defined and OFF — `modules/regions` enables apne1 since 2026-11-11 for a Tokyo MEDIA box only), each running the War Room game
 stack (matchd + wasm-gateway + one UnrealServer per match) through the War Room's OWN hosting tool `ops/warroom-game`
 (GKOIBuilder_AI). The two live game boxes (usw2 `i-08b3f695d885fe5bb`, euc1 `i-0d024ca1ecbc63523`, default VPC, hand-made
 on 2026-11-07) are NOT touched by this stack: the new boxes come up beside them on rehearsal names, then take the live
@@ -235,9 +235,12 @@ The two OLD boxes keep using `ops/warroom-game/roll.sh` (presigned `docker save`
 
 ## Tokyo (apne1)
 
-Defined, disabled. To enable: `modules/regions` apne1 on + network + registry (replication to ap-northeast-1) +
-observability (root README "Enabling a paused region"), the EC2 vCPU quota (≥ 4 for one t3a.xlarge), then
-`game_regions.apne1.enabled = true` and apply. The tool already has `ops.beta-apne1.env` + `config/matchd.beta-apne1.json`.
+Defined, disabled. Since 2026-11-11 the catalogue, network (VPC + peering), registry (replication to ap-northeast-1)
+and observability (the `/gkoi/prod2/game/apne1/*` log groups, the topic) are ON for the Tokyo media box
+(`envs/prod2/media/README.md` "Adding Tokyo (apne1)"). What is left for a game box: the vCPU headroom (Running
+On-Demand Standard = 640 vCPUs in ap-northeast-1, read 2026-11-11; the media box uses 4), a `gkoi/warroom-game` replica
+there (replication now covers ap-northeast-1; an image pushed before that needs `aws ecr start-replication-backfill`),
+then `game_regions.apne1.enabled = true` and apply. The tool already has `ops.beta-apne1.env` + `config/matchd.beta-apne1.json`.
 
 ## The 10-match load test (spec §4.1 / SPEC-AWS-GAME-SERVERS-EC2 §6)
 

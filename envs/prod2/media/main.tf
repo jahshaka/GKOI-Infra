@@ -99,6 +99,7 @@ locals {
     length(data.aws_ecr_image.origin_usw2) > 0 ? { usw2 = data.aws_ecr_image.origin_usw2[0].image_digest } : {},
     length(data.aws_ecr_image.origin_euc1) > 0 ? { euc1 = data.aws_ecr_image.origin_euc1[0].image_digest } : {},
     length(data.aws_ecr_image.origin_use1) > 0 ? { use1 = data.aws_ecr_image.origin_use1[0].image_digest } : {},
+    length(data.aws_ecr_image.origin_apne1) > 0 ? { apne1 = data.aws_ecr_image.origin_apne1[0].image_digest } : {},
   )
 
   agent_env = merge({
@@ -245,6 +246,13 @@ data "aws_ecr_image" "origin_use1" {
   image_tag       = var.media_origin_image_tag
 }
 
+data "aws_ecr_image" "origin_apne1" {
+  count           = var.media_origin_image_override == "" && contains(keys(local.enabled), "apne1") ? 1 : 0
+  provider        = aws.apne1
+  repository_name = var.media_origin_ecr_repo
+  image_tag       = var.media_origin_image_tag
+}
+
 # --- the secrets (EXISTING, us-west-2 — read by ARN; values never enter this state) -----------------------------
 
 data "aws_secretsmanager_secret" "engine" {
@@ -373,6 +381,41 @@ module "box_use1" {
   lifecycle_heartbeat_seconds = var.lifecycle_heartbeat_seconds
   config                      = local.config.use1
   user_data                   = local.user_data.use1
+}
+
+module "box_apne1" {
+  source    = "../../../modules/media-box"
+  count     = contains(keys(local.enabled), "apne1") ? 1 : 0
+  providers = { aws = aws.apne1 }
+
+  key                         = "apne1"
+  region                      = module.regions.all.apne1.region
+  account_id                  = var.account_id
+  is_home                     = false
+  vpc_id                      = local.net.regions.apne1.vpc_id
+  public_subnet_ids           = local.net.regions.apne1.public_subnet_ids
+  home_cidr                   = local.net.home_cidr
+  instance_type               = coalesce(local.enabled.apne1.instance_type, var.default_instance_type)
+  root_volume_gib             = local.enabled.apne1.root_volume_gib
+  ami_ssm_parameter           = var.ami_ssm_parameter
+  min_size                    = local.enabled.apne1.min_size
+  max_size                    = local.enabled.apne1.max_size
+  desired_capacity            = local.enabled.apne1.desired_capacity
+  pool_count                  = local.enabled.apne1.pool_count
+  origin_ingress_cidrs        = local.origin_ingress.apne1
+  origin_open_to_world        = local.enabled.apne1.origin_open_to_world
+  rehearsal_records           = local.rehearsal_records.apne1
+  live_records                = local.live_records.apne1
+  zone_id                     = var.zone_id
+  acme_names                  = local.config.apne1.cert_hosts
+  secret_arns                 = local.secret_arns.apne1
+  recordings_buckets          = local.recordings_buckets
+  bundle_object_arns          = local.bundle_object_arns
+  ecr_repositories            = local.ecr_repositories
+  alarm_topic_arn             = try(local.obs.alerts_topic_arns.apne1, null)
+  lifecycle_heartbeat_seconds = var.lifecycle_heartbeat_seconds
+  config                      = local.config.apne1
+  user_data                   = local.user_data.apne1
 }
 
 # --- Valkey (data stack) from the home box: a same-VPC SG reference. The spoke boxes come in through the data

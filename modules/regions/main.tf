@@ -1,7 +1,8 @@
 # The prod2 region catalogue: the ONE place a region is enabled or paused.
 #
-# Every stack reads this module, so enabling Tokyo (ap-northeast-1) later is one change here:
-# `apne1.enabled = true`, then apply network → registry → observability (README "Enabling a paused region").
+# Every stack reads this module, so a region is enabled by ONE change here, then network → registry → observability,
+# then data + edge-alb (they admit the new edge CIDR) (README "Enabling a paused region"). Tokyo (apne1) was enabled 2026-11-11 for a
+# media box only (envs/prod2/media/README.md "Adding Tokyo (apne1)"); its game box stays off in envs/prod2/game.
 #
 # CIDRs are 10.x on purpose: Lightsail's own VPC in us-west-2 / eu-central-1 is 172.26.0.0/16 (peered to the
 # default VPC) and the dev box's Docker uses 172.16–172.31.
@@ -33,7 +34,7 @@ locals {
       region  = "ap-northeast-1"
       cidr    = "10.40.0.0/16"
       role    = "edge"
-      enabled = false # PAUSED (operator 2026-11-10: Tokyo waits for its quota)
+      enabled = true # 2026-11-11: media only (game_regions.apne1 stays off)
       azs     = null
     }
   }
