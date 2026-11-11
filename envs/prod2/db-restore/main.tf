@@ -48,18 +48,18 @@ locals {
   pw_secret_arn = { for app, a in var.apps : app => "arn:aws:secretsmanager:${local.region}:${var.account_id}:secret:${a.pw_secret}-??????" }
 
   image = {
-    postgres = "${local.repos["postgres"]}@${data.aws_ecr_image.postgres.image_digest}"
-    aws_cli  = "${local.repos["aws-cli"]}@${data.aws_ecr_image.aws_cli.image_digest}"
+    postgres = "${local.repos["ci-postgres"]}@${data.aws_ecr_image.postgres.image_digest}"
+    aws_cli  = "${local.repos["ci-aws-cli"]}@${data.aws_ecr_image.aws_cli.image_digest}"
   }
 }
 
 data "aws_ecr_image" "postgres" {
-  repository_name = "gkoi/postgres"
+  repository_name = "gkoi/ci-postgres"
   image_tag       = var.postgres_image_tag
 }
 
 data "aws_ecr_image" "aws_cli" {
-  repository_name = "gkoi/aws-cli"
+  repository_name = "gkoi/ci-aws-cli"
   image_tag       = var.awscli_image_tag
 }
 
@@ -179,7 +179,7 @@ data "aws_iam_policy_document" "exec" {
   statement {
     sid       = "EcrPullMirrors"
     actions   = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
-    resources = ["arn:aws:ecr:${local.region}:${var.account_id}:repository/gkoi/postgres", "arn:aws:ecr:${local.region}:${var.account_id}:repository/gkoi/aws-cli"]
+    resources = ["arn:aws:ecr:${local.region}:${var.account_id}:repository/gkoi/ci-postgres", "arn:aws:ecr:${local.region}:${var.account_id}:repository/gkoi/ci-aws-cli"]
   }
   statement {
     sid       = "OwnLogs"

@@ -50,13 +50,13 @@ variable "allow_generate_password" {
 # Mirrors pushed once by the orchestrator (registry extra_repositories; README "db-restore"). The plan resolves each
 # tag to its digest (data.aws_ecr_image) and fails if it was not pushed.
 variable "postgres_image_tag" {
-  description = "gkoi/postgres: postgres:16.15-alpine (prod's 16.15), pulled by digest sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139."
+  description = "gkoi/ci-postgres: postgres:16.15-alpine (prod's 16.15), pulled by digest sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139."
   type        = string
   default     = "16.15-alpine"
 }
 
 variable "awscli_image_tag" {
-  description = "gkoi/aws-cli: amazon/aws-cli:2.22.35 (the version gkoi-aws uses), digest sha256:6977c83ae3dc99f28fcf8276b9ea5eec33833cd5be40574b34112e98113ec7a2."
+  description = "gkoi/ci-aws-cli: amazon/aws-cli:2.22.35 (the version gkoi-aws uses), digest sha256:6977c83ae3dc99f28fcf8276b9ea5eec33833cd5be40574b34112e98113ec7a2."
   type        = string
   default     = "2.22.35"
 }

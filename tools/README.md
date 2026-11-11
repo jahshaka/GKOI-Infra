@@ -80,15 +80,15 @@ repo's own root `buildspec.yml` from the zip (no override). One run at a time: t
 
 ## Databases: prod → RDS (`gkoi-db-dump` + `gkoi-db-restore`, stack `envs/prod2/db-restore`)
 
-Once: apply `registry` (repos `gkoi/postgres`, `gkoi/aws-cli`), push the two mirrors, apply `db-restore`:
+Once: apply `registry` (repos `gkoi/ci-postgres`, `gkoi/ci-aws-cli`), push the two mirrors, apply `db-restore`:
 
 ```
 R=127214190346.dkr.ecr.us-west-2.amazonaws.com
 gkoi-aws ecr get-login-password | docker login --username AWS --password-stdin $R
 docker pull postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139   # = postgres:16.15-alpine (amd64)
-docker tag postgres:16.15-alpine $R/gkoi/postgres:16.15-alpine && docker push $R/gkoi/postgres:16.15-alpine
+docker tag postgres:16.15-alpine $R/gkoi/ci-postgres:16.15-alpine && docker push $R/gkoi/ci-postgres:16.15-alpine
 docker pull amazon/aws-cli@sha256:6977c83ae3dc99f28fcf8276b9ea5eec33833cd5be40574b34112e98113ec7a2  # = 2.22.35
-docker tag amazon/aws-cli:2.22.35 $R/gkoi/aws-cli:2.22.35 && docker push $R/gkoi/aws-cli:2.22.35
+docker tag amazon/aws-cli:2.22.35 $R/gkoi/ci-aws-cli:2.22.35 && docker push $R/gkoi/ci-aws-cli:2.22.35
 tools/gkoi-infra-run db-restore plan ; tools/gkoi-infra-run db-restore apply
 ```
 
@@ -101,8 +101,8 @@ tools/gkoi-db-dump engine                  # prints the next command, with the k
 tools/gkoi-db-restore engine engine/<stamp>/mikaido.dump --sha256 <hex> [--drop-first]
 ```
 
-The task: `fetch` (gkoi/aws-cli, task role = this app's prefix + this app's password secret, READ) downloads the dump +
-sidecar, checks the sha256, reads the password; `restore` (gkoi/postgres, the RDS master injected from the RDS-managed
+The task: `fetch` (gkoi/ci-aws-cli, task role = this app's prefix + this app's password secret, READ) downloads the dump +
+sidecar, checks the sha256, reads the password; `restore` (gkoi/ci-postgres, the RDS master injected from the RDS-managed
 secret) creates/re-asserts the app's ONE role (owner + login: `cms`, `mikaido_app`, `filemanager_app` — the repos' C-4
 rule), creates the database OWNER it (collate C = prod's musl byte order), `pg_restore --no-owner --no-acl --role`
 in one transaction, ANALYZE, proves nothing is owned by anyone else, signs in as the role over TLS: `RESTORE_OK`.
