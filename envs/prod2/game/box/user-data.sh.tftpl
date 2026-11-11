@@ -1,0 +1,38 @@
+#!/bin/bash
+# GKOI game box user-data (rendered by envs/prod2/game; NO secrets here — only where the box's config lives).
+# Fetches the game-box bundle named by the config parameter, checks every file's sha256, then runs game-bootstrap.sh apply.
+# Everything after this point is idempotent and re-runnable over SSM: /opt/gkoi-game/game-bootstrap.sh apply
+set -euo pipefail
+exec >>/var/log/gkoi-game-bootstrap.log 2>&1
+echo "== user-data $(date -u +%FT%TZ)"
+export HOME="$${HOME:-/root}"; cd /
+REGION='${region}'
+PARAM='${config_param}'
+BOX=/opt/gkoi-game
+install -d -m 0755 "$BOX" /etc/gkoi-game
+# unattended-upgrades holds the dpkg lock at first boot: every apt-get on this box (ops/warroom-game's bootstrap.sh too) waits.
+printf 'DPkg::Lock::Timeout "600";\n' > /etc/apt/apt.conf.d/90-gkoi-lock-timeout
+command -v aws >/dev/null 2>&1 || snap install aws-cli --classic
+PATH="/snap/bin:$PATH"
+# Captured, not redirected: under SSM / early boot the snap aws CLI can write NOTHING to a redirected file and exit 0.
+val=""
+for i in 1 2 3 4 5 6; do
+  val="$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --query Parameter.Value --output text)" && [ -n "$val" ] && break
+  echo "config parameter not readable yet (attempt $i)"; sleep 10
+done
+printf '%s\n' "$val" > /etc/gkoi-game/config.json.new
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' /etc/gkoi-game/config.json.new
+mv /etc/gkoi-game/config.json.new /etc/gkoi-game/config.json
+python3 - /etc/gkoi-game/config.json >/tmp/gkoi-game-bundle.list <<'PY'
+import json, sys
+b = json.load(open(sys.argv[1]))["bundle"]
+for f, sha in sorted(b["files"].items()):
+    print(b["bucket"], b["region"], b["prefix"] + f, f, sha)
+PY
+while read -r bucket bregion key file sha; do
+  aws s3 cp --only-show-errors --region "$bregion" "s3://$bucket/$key" "$BOX/$file.new"
+  echo "$sha  $BOX/$file.new" | sha256sum -c --quiet -
+  mv "$BOX/$file.new" "$BOX/$file"
+done </tmp/gkoi-game-bundle.list
+chmod 0755 "$BOX"/*.sh
+exec "$BOX/game-bootstrap.sh" apply

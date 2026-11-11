@@ -30,8 +30,9 @@ modules/
   region-log-groups/     log groups in one region + a read of its existing gkoi-ops-alerts topic
   ecs-service/           one Fargate task definition + ECS service (surge 100/200, circuit breaker, Exec) + CPU target tracking
   media-box/             one region's media box: ASG (1) + launch template, EIP, SGs, /gkoi/ role, SSM config, DNS, alarms
+  game-box/              one region's War Room game box: ASG (1) + launch template, EIP, SG, /gkoi/ role, SSM config, DNS, alarms
 envs/prod2/
-  network/  edge-alb/  data/  registry/  observability/  compute/  media/  rehearsal/   one state file each: prod2/<stack>/terraform.tfstate
+  network/  edge-alb/  data/  registry/  observability/  compute/  media/  rehearsal/  game/   one state file each: prod2/<stack>/terraform.tfstate
   releases/<repo>.json   the pinned image digests gkoi-release records (compute reads them)
 ```
 
@@ -48,6 +49,7 @@ The state bucket, lock table, runner project and its role were created by hand i
 | `observability` | Log groups (30 days): `/gkoi/prod2/ecs/<service>`, `/gkoi/prod2/ops`, `/gkoi/prod2/{media,game}/<region>/{container,syslog,bootstrap}` per enabled region; dashboard `gkoi-prod2` (ALB, RDS, Valkey, EFS); alarms → `gkoi-ops-alerts` (usw2): RDS CPU / storage / memory / connections, Valkey memory / CPU, ALB 5xx, per-target-group unhealthy hosts, EFS IO limit | the `gkoi-ops-alerts` topics; network, edge-alb and data state |
 | `media` | Per enabled media region (usw2, euc1, use1 — all three by default; a map turns one off): an ASG of ONE EC2 media box (`m7i.xlarge`, Ubuntu 24.04, SSM only), its EIP, SGs (public RTMPS / ICE / CloudFront→443; the engine's private pool ports), role `/gkoi/gkoi-prod2-media-<key>`, `/gkoi/prod2/media/<key>/config`, rehearsal A records, alarms; once: the box bundle in the sources bucket, the usw2 box's rules on Valkey + the internal ALB. README in `envs/prod2/media/` | network, edge-alb (`engine_internal`), data, observability state; `gkoi/ci-nginx` in each region's ECR; the engine + origin-verify secrets (ARNs); `releases/mikaido.json`; zone `gkoi.com` |
 | `compute` | ECS cluster `gkoi-prod2` (Container Insights, FARGATE); services `cms`, `engine-api`, `engine-worker`, `fm-api`, `fm-worker`, `fm-web` (each held at 0 while in `parked_services` — default all; `rehearsal = true` points the engine at the scratch bucket only); migrator task definitions `gkoi-prod2-{cms,engine,fm}-migrate`; 25 EMPTY secrets `gkoi/prod2/<app>/<NAME>`; execution roles `/gkoi/gkoi-prod2-exec-{cms,engine,fm}` + task roles `/gkoi/gkoi-prod2-task-*`; log group `/gkoi/prod2/ecs/engine-edge` | network, edge-alb, data, registry state; the existing `gkoi/edge/live-origin` secret (ARN only); the buckets `gkoi-beta-vods` / `gkoi-beta-files`; observability's log groups |
+| `game` | Per enabled game region (usw2, euc1, use1 on; apne1 defined + off): an ASG of ONE War Room game box (`t3a.xlarge` standard credits = the live boxes, Ubuntu 24.04, SSM only) running GKOIBuilder_AI's `ops/warroom-game` from the release's own source.zip, its EIP, SG (tcp 9443, tcp + udp 8443), role `/gkoi/gkoi-prod2-game-<key>`, `/gkoi/prod2/game/<key>/config`, rehearsal A records `game-/gw-<key>-p2` (the live names behind `manage_live_records`), alarms; once: the EMPTY secret `gkoi/prod2/game/match-server-key`, the box bundle. README in `envs/prod2/game/` | network, observability state; `releases/warroom-game.json` (gkoi-release warroom-game); `gkoi/warroom-game` in each region's ECR; zone `gkoi.com` |
 | `rehearsal` | The private go-live rehearsal driver: task definition `gkoi-prod2-rehearsal-driver` (Node 22 Alpine from ECR Public + ffmpeg; the driver inlined), roles `/gkoi/gkoi-prod2-{exec,task}-rehearsal-driver`, log group `/gkoi/prod2/ecs/rehearsal-driver`, SSM `/gkoi/prod2/rehearsal/run-config`. README in `envs/prod2/rehearsal/` | network, edge-alb, data, compute and media state; the gateway + origin-verify secrets (ARNs) |
 
 **Service counts.** The services live in `compute`. `edge-alb`'s `services` variable carries each control-plane service's
@@ -75,6 +77,8 @@ before origin-live moves to the ALB in P3.
    `gkoi/ci-nginx` mirror push — `envs/prod2/media/README.md` "Apply order")
 8. `rehearsal` (the private go-live rehearsal's driver task: after compute + media flipped their `rehearsal` switch —
    `envs/prod2/rehearsal/README.md`)
+9. `game` (P6: independent of 3–8 — needs network, observability and a `gkoi-release warroom-game <tag>` record;
+   `envs/prod2/game/README.md` "Apply order")
 
 Each stack: `plan`, read the summary, then `apply` (which re-plans and applies exactly that saved plan).
 
@@ -108,6 +112,7 @@ counts and addresses, then deleted).
 | `registry` | **a few $** | ECR $0.10/GB-month × 3 regions (replicas); replication $0.02/GB; CodeBuild LARGE ~$0.02/min only while building (~$0.20–0.40 per release). |
 | `compute` | **~$160 + ~$10** | Fargate at min 1 ("The compute stack" below); 25 secrets × $0.40; Container Insights metrics; log ingestion $0.50/GB. A deploy briefly doubles a service. |
 | `observability` | **~$4** | ~12 alarms × $0.10; dashboard $3 (after the account's first 3); log storage $0.03/GB-month, ingestion $0.50/GB. |
+| `game` | **~$140 per region** | t3a.xlarge ~$110 (euc1 ~$126), gp3 40 GiB ~$3.2, EIP ~$3.6, CloudWatch agent + matchd metrics + 7 alarms ~$15–25; the secret $0.40. Three regions ≈ $420–450 (`envs/prod2/game/README.md` "Cost"). |
 
 Cheaper knobs if wanted: endpoints in one AZ only (~−$65), drop flow logs to `REJECT`, Valkey `cache.t4g.micro` (~−$10).
 

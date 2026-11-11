@@ -1,0 +1,64 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root",
+    "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+  },
+  "metrics": {
+    "namespace": "@@CW_NAMESPACE@@",
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    },
+    "aggregation_dimensions": [["AutoScalingGroupName"]],
+    "metrics_collected": {
+      "cpu": { "totalcpu": true, "measurement": ["usage_active", "usage_iowait", "usage_steal"] },
+      "mem": { "measurement": ["mem_used_percent", "mem_available"] },
+      "swap": { "measurement": ["swap_used_percent"] },
+      "disk": { "resources": ["/"], "measurement": ["used_percent", "inodes_used"], "ignore_file_system_types": ["sysfs", "devtmpfs", "tmpfs", "overlay", "squashfs"] },
+      "net": { "resources": ["*"], "measurement": ["bytes_sent", "bytes_recv"] },
+      "procstat": [
+        { "exe": "UnrealServer", "measurement": ["cpu_usage", "memory_rss", "pid_count"] },
+        { "exe": "matchd", "measurement": ["cpu_usage", "memory_rss", "pid_count"] },
+        { "exe": "wasm-gateway", "measurement": ["cpu_usage", "memory_rss", "pid_count"] }
+      ]
+    }
+  },
+  "logs": {
+    "metrics_collected": {
+      "prometheus": {
+        "prometheus_config_path": "@@PROM_CONF@@",
+        "log_group_name": "@@CW_METRICS_LOG_GROUP@@",
+        "emf_processor": {
+          "metric_namespace": "@@CW_NAMESPACE@@",
+          "metric_declaration_dedup": true,
+          "metric_declaration": [
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^matchd$",
+              "dimensions": [["region_key", "window"]],
+              "metric_selectors": ["^matchd_box_steal_percent$", "^matchd_box_cpu_busy_percent$"]
+            },
+            {
+              "source_labels": ["job"],
+              "label_matcher": "^matchd$",
+              "dimensions": [["region_key", "kind", "server"]],
+              "metric_selectors": ["^matchd_server_cpu_percent$", "^matchd_server_rss_bytes$"]
+            }
+          ]
+        }
+      }
+    },
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/lib/docker/containers/*/*-json.log", "log_group_name": "@@CW_LOG_PREFIX@@/container", "log_stream_name": "{instance_id}", "retention_in_days": 30 },
+          { "file_path": "/var/log/syslog", "log_group_name": "@@CW_LOG_PREFIX@@/syslog", "log_stream_name": "{instance_id}", "retention_in_days": 30 },
+          { "file_path": "/var/log/gkoi-game-bootstrap.log", "log_group_name": "@@CW_LOG_PREFIX@@/bootstrap", "log_stream_name": "{instance_id}", "retention_in_days": 30 },
+          { "file_path": "/var/log/warroom-game-bootstrap.log", "log_group_name": "@@CW_LOG_PREFIX@@/bootstrap", "log_stream_name": "{instance_id}-warroom", "retention_in_days": 30 },
+          { "file_path": "/var/log/letsencrypt/letsencrypt.log", "log_group_name": "@@CW_LOG_PREFIX@@/bootstrap", "log_stream_name": "{instance_id}-certbot", "retention_in_days": 30 }
+        ]
+      }
+    }
+  }
+}
