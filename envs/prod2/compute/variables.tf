@@ -370,7 +370,7 @@ variable "cms_source_cidrs" {
     variable (the files allow-list) — keep the two equal. 1–2 IPv4 CIDRs (the edge template takes two).
   EOT
   type        = list(string)
-  default     = ["52.24.67.48/32", "32.189.104.202/32"]
+  default     = ["32.189.104.202/32"]
   validation {
     condition = (
       length(var.cms_source_cidrs) >= 1 && length(var.cms_source_cidrs) <= 2 &&

@@ -111,7 +111,7 @@ variable "cms_source_cidrs" {
     TRUSTED_PROXIES — keep the two equal. 1–2 IPv4 CIDRs (the engine edge takes two).
   EOT
   type        = list(string)
-  default     = ["52.24.67.48/32", "32.189.104.202/32"]
+  default     = ["32.189.104.202/32"]
   validation {
     condition = (
       length(var.cms_source_cidrs) >= 1 && length(var.cms_source_cidrs) <= 2 &&
