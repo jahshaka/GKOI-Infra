@@ -66,6 +66,7 @@ variable "media_regions" {
       live_origin_host      = "origin-live-usw2.gkoi.com"
       origin_verify_secret  = "gkoi/media/usw2/origin-verify"
       serve_live_names      = true
+      manage_live_records   = true
     }
     euc1 = {
       enabled               = true
@@ -76,6 +77,7 @@ variable "media_regions" {
       live_origin_host      = "origin-live-euc1.gkoi.com"
       origin_verify_secret  = "gkoi/media/euc1/origin-verify"
       serve_live_names      = true
+      manage_live_records   = true
     }
     use1 = {
       enabled               = true
