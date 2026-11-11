@@ -102,6 +102,8 @@ variable "media_regions" {
       live_stream_host      = "stream-apne1.gkoi.com"
       live_origin_host      = "origin-live-apne1.gkoi.com"
       origin_verify_secret  = "gkoi/media/apne1/origin-verify"
+      serve_live_names      = true
+      manage_live_records   = true
     }
   }
   validation {
