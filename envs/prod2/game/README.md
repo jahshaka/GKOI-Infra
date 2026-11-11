@@ -1,7 +1,7 @@
 # `envs/prod2/game` — the War Room GAME servers on EC2 ASGs (P6)
 
 PLAN-AWS-MIGRATION-PROD2-V1 §P6 (+ R2). One ASG of ONE EC2 instance per enabled region (`var.game_regions`: usw2 /
-euc1 / use1 on, apne1 defined and OFF — `modules/regions` enables apne1 since 2026-11-11 for a Tokyo MEDIA box only), each running the War Room game
+euc1 / use1 / apne1 — Tokyo added 2026-11-11, "Tokyo" below), each running the War Room game
 stack (matchd + wasm-gateway + one UnrealServer per match) through the War Room's OWN hosting tool `ops/warroom-game`
 (GKOIBuilder_AI). The two live game boxes (usw2 `i-08b3f695d885fe5bb`, euc1 `i-0d024ca1ecbc63523`, default VPC, hand-made
 on 2026-11-07) are NOT touched by this stack: the new boxes come up beside them on rehearsal names, then take the live
@@ -235,12 +235,33 @@ The two OLD boxes keep using `ops/warroom-game/roll.sh` (presigned `docker save`
 
 ## Tokyo (apne1)
 
-Defined, disabled. Since 2026-11-11 the catalogue, network (VPC + peering), registry (replication to ap-northeast-1)
-and observability (the `/gkoi/prod2/game/apne1/*` log groups, the topic) are ON for the Tokyo media box
-(`envs/prod2/media/README.md` "Adding Tokyo (apne1)"). What is left for a game box: the vCPU headroom (Running
-On-Demand Standard = 640 vCPUs in ap-northeast-1, read 2026-11-11; the media box uses 4), a `gkoi/warroom-game` replica
-there (replication now covers ap-northeast-1; an image pushed before that needs `aws ecr start-replication-backfill`),
-then `game_regions.apne1.enabled = true` and apply. The tool already has `ops.beta-apne1.env` + `config/matchd.beta-apne1.json`.
+ON since 2026-11-11 (operator): `game_regions.apne1 = { enabled, serve_live_names, manage_live_records }` — both names
+(`game-apne1` / `gw-apne1.gkoi.com`) are NEW, so the box serves AND owns them from its first boot (the media box's path B;
+the `-p2` rehearsal records exist too). The catalogue, network, registry (replication to ap-northeast-1 — the
+`gkoi/warroom-game:1.0.15.3.3-h6` replica is there, digest `sha256:9dc05d31…`), observability (log groups, the
+`gkoi-ops-alerts` topic) and the vCPU quota (640) were done for the Tokyo media box. The tool's `ops.beta-apne1.env` +
+`config/matchd.beta-apne1.json` (on GKOIBuilder_AI main AND in the release's 704e7de) = use1's with the region swapped:
+`region` / `identity.default_region` `apne1`, kid `beta-apne1-1`, `https://gw-apne1.gkoi.com:8443` (+ `/v1/admission`).
+
+**No snap store from the Tokyo VPC** (2026-11-11: `api.snapcraft.io` timed out for 1+ hour). This stack's box layer is
+snap-free (boto3 user-data, the pinned AWS CLI zip), but the release's own War Room tool (1.0.15.3.3-h6 = GKOIBuilder_AI
+704e7de) installs certbot from the snap and dies without it. The fix (`ops/warroom-game/bootstrap.sh`: certbot kept → snap
+→ Ubuntu's certbot + python3-certbot-dns-route53 → a venv; any running SSM agent accepted; the deploy hook ignores other
+lineages) is a TOOL change, not an image change, so it reaches the box through `warroom_tool_override`, scoped to Tokyo by
+`warroom_tool_override_regions = ["apne1"]` — the three live boxes' config parameters stay byte-identical (tests:
+`default_four_regions`). The plan STOPS (`no_snap_store_regions`, default `["apne1"]`) while Tokyo would get a tool that
+needs the snap. Once a War Room release is cut from a GKOIBuilder_AI commit that carries the fallback, set
+`release_tool_snap_free = true` and drop the override.
+
+The tool zip, by hand (the orchestrator; the commit must be the fallback's, on main):
+```
+cd ~/Development/mikaido && C=$(git rev-parse <commit>)
+git archive --format=zip -o /tmp/wr-tool-$C.zip $C ops/warroom-game      # the zip comment = $C (the box checks it)
+sha256sum /tmp/wr-tool-$C.zip
+cd /tmp && gkoi-aws s3 cp wr-tool-$C.zip s3://gkoi-build-sources-127214190346/warroom-game/tool/$C.zip
+# variables.tf: warroom_tool_override = { s3_key = "warroom-game/tool/<C>.zip", sha256 = "<hex>", commit = "<C>" }
+#               warroom_tool_override_regions = ["apne1"]
+```
 
 ## The 10-match load test (spec §4.1 / SPEC-AWS-GAME-SERVERS-EC2 §6)
 
@@ -258,15 +279,15 @@ rendered user-data in `koalaman/shellcheck`.
 
 ## Cost (on-demand list prices from memory, per month — verify with the pricing data)
 
-| Item | usw2 | euc1 | use1 | (apne1) |
+| Item | usw2 | euc1 | use1 | apne1 |
 |---|---|---|---|---|
 | t3a.xlarge, standard credits | ~$110 | ~$126 | ~$110 | ~$143 |
 | gp3 40 GiB | ~$3.2 | ~$3.8 | ~$3.2 | ~$3.8 |
 | Elastic IP (public IPv4) | ~$3.6 | ~$3.6 | ~$3.6 | ~$3.6 |
-| CloudWatch: ~40 agent metrics (instance + ASG aggregation, procstat) + matchd gauges (4 box + up to ~2 × 13 per-server while live) + 7 alarms + logs | ~$15–25 | ~$15–25 | ~$15–25 | |
-| **Region** | **~$135–145** | **~$150–160** | **~$135–145** | |
+| CloudWatch: ~40 agent metrics (instance + ASG aggregation, procstat) + matchd gauges (4 box + up to ~2 × 13 per-server while live) + 7 alarms + logs | ~$15–25 | ~$15–25 | ~$15–25 | ~$15–25 |
+| **Region** | **~$135–145** | **~$150–160** | **~$135–145** | **~$165–175** |
 
-The match-server secret $0.40. Three regions ≈ **$420–450/month** (today's two hand-made boxes ≈ $245). During a
+The match-server secret $0.40. Three regions ≈ **$420–450/month**, four (with Tokyo) ≈ **$585–625** (today's two hand-made boxes ≈ $245). During a
 replacement both boxes run (≈ a few dollars a day); a STOPPED old instance costs only its 40 GiB volume + EIP (~$7). The
 per-server CloudWatch series are the biggest knob: drop the second `metric_declaration` (per-server) in
 `box/cloudwatch-agent.json.tmpl` to save ~$5–8 per region. `unlimited` credits: at most ~$87/month extra per box if pinned

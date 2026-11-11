@@ -1,5 +1,5 @@
 # Stage P6 — game: the War Room GAME servers on EC2, one ASG (min/max 1) per enabled region of var.game_regions
-# (usw2 / euc1 / use1 on, apne1 defined + off), each box running the War Room's own hosting tool ops/warroom-game
+# (usw2 / euc1 / use1 / apne1), each box running the War Room's own hosting tool ops/warroom-game
 # (GKOIBuilder_AI) — the same source.zip CodeBuild built the image from — wrapped by box/game-bootstrap.sh.
 # README.md has the order, the use1 bring-up, the one-at-a-time replacement of usw2 + euc1 and the rollback.
 
@@ -46,16 +46,24 @@ locals {
   release_digest = try(local.release.digest, "")
 
   # The tool = the release's own source.zip (git archive of ops/warroom-game at the commit the image was built from),
-  # unless a tool-only zip is named.
-  tool = var.warroom_tool_override != null ? {
-    s3_key = var.warroom_tool_override.s3_key
-    sha256 = var.warroom_tool_override.sha256
-    commit = var.warroom_tool_override.commit
-    } : {
+  # unless a tool-only zip is named — for every enabled region, or only those in warroom_tool_override_regions (the
+  # others' config parameters then stay byte-identical: a plan touches nothing of theirs).
+  release_tool = {
     s3_key = "warroom-game/${local.release_tag}/source.zip"
     sha256 = try(local.release.source_sha256, "")
     commit = try(local.release.commit, "")
   }
+  override_tool = var.warroom_tool_override == null ? null : {
+    s3_key = var.warroom_tool_override.s3_key
+    sha256 = var.warroom_tool_override.sha256
+    commit = var.warroom_tool_override.commit
+  }
+  tool_overridden = {
+    for k, v in local.enabled : k => var.warroom_tool_override != null && (var.warroom_tool_override_regions == null || contains(coalesce(var.warroom_tool_override_regions, []), k))
+  }
+  tool_for = { for k, v in local.enabled : k => local.tool_overridden[k] ? local.override_tool : local.release_tool }
+  # enabled regions that cannot reach the snap store and would run a tool that needs it
+  snap_blocked = [for k, v in local.enabled : k if contains(var.no_snap_store_regions, k) && !local.tool_overridden[k] && !var.release_tool_snap_free]
 
   # ---- the box bundle: every file of box/ except the user-data template, at STABLE keys (an in-place update, never a
   # delete); the config carries each file's sha256 and the box refuses a file that does not match it.
@@ -97,7 +105,7 @@ locals {
         registry = "${var.account_id}.dkr.ecr.${module.regions.all[k].region}.amazonaws.com"
         ref      = "${var.account_id}.dkr.ecr.${module.regions.all[k].region}.amazonaws.com/gkoi/warroom-game@${local.release_digest}"
       }
-      tool = merge(local.tool, { bucket = var.bundle_bucket, region = "us-west-2" })
+      tool = merge(local.tool_for[k], { bucket = var.bundle_bucket, region = "us-west-2" })
       bundle = {
         bucket = var.bundle_bucket
         region = "us-west-2"
@@ -149,8 +157,16 @@ resource "terraform_data" "preflight" {
       error_message = "releases/warroom-game.json: no War Room tag / gkoi/warroom-game digest."
     }
     precondition {
-      condition     = can(regex("^[0-9a-f]{64}$", local.tool.sha256)) && can(regex("^[0-9a-f]{40}$", local.tool.commit))
+      condition     = alltrue([for k, t in local.tool_for : can(regex("^[0-9a-f]{64}$", t.sha256)) && can(regex("^[0-9a-f]{40}$", t.commit))])
       error_message = "The War Room tool zip has no sha256 / commit (releases/warroom-game.json source_sha256 + commit, or warroom_tool_override)."
+    }
+    precondition {
+      condition     = length(local.snap_blocked) == 0
+      error_message = "${join(", ", local.snap_blocked)}: no snap store from that VPC, and the release's own War Room tool installs certbot from the snap. Name the snap-free tool zip in warroom_tool_override (+ warroom_tool_override_regions), or set release_tool_snap_free once a release carries the fallback (README \"Tokyo\")."
+    }
+    precondition {
+      condition     = var.warroom_tool_override_regions == null || length(setsubtract(coalesce(var.warroom_tool_override_regions, []), keys(local.enabled))) == 0
+      error_message = "warroom_tool_override_regions names a region that is not enabled."
     }
     precondition {
       condition     = length(local.enabled) == length(local.asked)
@@ -318,9 +334,8 @@ module "box_use1" {
   user_data                   = local.user_data.use1
 }
 
-# Tokyo — DISABLED by default (game_regions.apne1.enabled = false; modules/regions pauses apne1). To enable: the
-# catalogue + network + observability first (modules/regions README), add ap-northeast-1 to the registry stack's ECR
-# replication, the EC2 vCPU quota, then game_regions.apne1.enabled = true.
+# Tokyo (2026-11-11): on its live names from the first boot; its VPC has no snap store, so it runs the snap-free tool
+# zip (warroom_tool_override + warroom_tool_override_regions; the preflight refuses otherwise). README "Tokyo".
 module "box_apne1" {
   source    = "../../../modules/game-box"
   count     = contains(keys(local.enabled), "apne1") ? 1 : 0

@@ -28,8 +28,7 @@ provider "aws" {
   default_tags { tags = local.tags }
 }
 
-# Tokyo: defined, DISABLED (modules/regions pauses apne1 — no VPC — and game_regions.apne1.enabled = false). Nothing is
-# created in this region until both are switched on; README "Tokyo".
+# Tokyo (ap-northeast-1): the apne1 game box (game_regions.apne1; README "Tokyo").
 provider "aws" {
   alias               = "apne1"
   region              = "ap-northeast-1"

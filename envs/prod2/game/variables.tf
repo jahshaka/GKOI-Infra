@@ -53,10 +53,12 @@ variable "game_regions" {
     live_gateway_host      = optional(string)
   }))
   default = {
-    usw2  = { enabled = true, serve_live_names = true, manage_live_records = true }
-    euc1  = { enabled = true, serve_live_names = true, manage_live_records = true }
-    use1  = { enabled = true, serve_live_names = true, manage_live_records = true }
-    apne1 = { enabled = false } # Tokyo: the vCPU quota is pending (operator 2026-11-10); README "Tokyo"
+    usw2 = { enabled = true, serve_live_names = true, manage_live_records = true }
+    euc1 = { enabled = true, serve_live_names = true, manage_live_records = true }
+    use1 = { enabled = true, serve_live_names = true, manage_live_records = true }
+    # Tokyo (operator 2026-11-11): both names are NEW, so the box serves + owns them from its first boot (like the media
+    # box's path B). Its VPC cannot reach the snap store: the preflight needs it covered by warroom_tool_override.
+    apne1 = { enabled = true, serve_live_names = true, manage_live_records = true }
   }
   validation {
     condition     = alltrue([for k, v in var.game_regions : contains(["usw2", "euc1", "use1", "apne1"], k)])
@@ -144,11 +146,38 @@ variable "warroom_tool_override" {
     sha256 = string
     commit = string
   })
-  default = null
+  default = {
+    s3_key = "warroom-game/tool/408a3107a740dd851cd5a05b96f9193dc0adad00.zip"
+    sha256 = "8f927119015d72314c567e7911127b3fbeb7c2a471c7c8bef716bbfd974275f6"
+    commit = "408a3107a740dd851cd5a05b96f9193dc0adad00"
+  }
   validation {
     condition     = var.warroom_tool_override == null || can(regex("^warroom-game/", var.warroom_tool_override.s3_key))
     error_message = "The tool zip lives under warroom-game/ in the bundle bucket (the box role reads only there)."
   }
+}
+
+variable "warroom_tool_override_regions" {
+  description = "The regions warroom_tool_override applies to (null = every enabled region). The others keep the release's own tool zip — and an unchanged config parameter."
+  type        = list(string)
+  default     = ["apne1"]
+}
+
+variable "no_snap_store_regions" {
+  description = <<-EOT
+    Regions whose VPC cannot reach the snap store (2026-11-11: api.snapcraft.io unreachable from ap-northeast-1 for hours).
+    The release 1.0.15.3.3-h6's own tool (GKOIBuilder_AI 704e7de) installs certbot from the snap and dies without it, so
+    the plan STOPS while such a region is enabled without the snap-free tool (warroom_tool_override covering it), unless
+    release_tool_snap_free says the release's own tool is snap-free (a release cut after the bootstrap fallback landed).
+  EOT
+  type        = list(string)
+  default     = ["apne1"]
+}
+
+variable "release_tool_snap_free" {
+  description = "true = the release's own ops/warroom-game (source.zip) already has the certbot/SSM fallbacks (no snap store needed)."
+  type        = bool
+  default     = false
 }
 
 variable "match_server_key_secret" {

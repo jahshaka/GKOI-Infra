@@ -25,7 +25,7 @@ output "boxes" {
 }
 
 output "warroom_release" {
-  value = { tag = local.release_tag, digest = local.release_digest, tool = local.tool }
+  value = { tag = local.release_tag, digest = local.release_digest, tool = local.tool_for }
 }
 
 output "match_server_key_secret_arn" {
