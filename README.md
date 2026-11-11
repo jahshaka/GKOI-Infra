@@ -42,7 +42,7 @@ The state bucket, lock table, runner project and its role were created by hand i
 | Stack | Creates | Reads (never changes) |
 |---|---|---|
 | `network` | A VPC per enabled region (usw2 10.10/16, euc1 10.20/16, use1 10.30/16; apne1 10.40/16 when enabled), 2 AZs, public + private /20s, IGW; ONE NAT gateway in usw2 (`home_nat_mode = per_az` for one per AZ); S3 gateway endpoint everywhere; interface endpoints in usw2 (ecr.api, ecr.dkr, secretsmanager, logs, ssm, ssmmessages, ec2messages, kms, sts); peering usw2 ↔ each spoke with routes in every route table; flow logs (ALL, 10-min aggregation) to `/gkoi/prod2/vpc-flow/<region>` (7 days) + the role `/gkoi/gkoi-prod2-vpc-flow-logs`; each VPC's default SG locked; the shared `gkoi-prod2-ecs-tasks` SG | — |
-| `edge-alb` | The public ALB `gkoi-prod2-alb` (usw2, 2 AZs, deletion protection on); an ACM cert for engine / files / origin-www / origin-cdn / origin-labs / origin-live `.gkoi.com` with its DNS-validation CNAMEs; HTTP→HTTPS 301; HTTPS default 404; host rules → target groups `cms` (origin-www/cdn/labs), `engine-api` (engine), `fm-api` (files), `fm-web` (no host: the FM admin is reached through the site's admin mount); the origin-live lock (below); ALB↔tasks SG rules | Route 53 zone `gkoi.com`; secret `gkoi/edge/live-origin`; network state |
+| `edge-alb` | The public ALB `gkoi-prod2-alb` (usw2, 2 AZs, deletion protection on); an ACM cert for engine / files / origin-www / origin-cdn / origin-labs / origin-live `.gkoi.com` with its DNS-validation CNAMEs; HTTP→HTTPS 301; HTTPS default 404; host rules → target groups `cms` (origin-www/cdn/labs + www; the apex 301s to www), `engine-api` (engine), `fm-api` (files: public paths for all, the rest from `cms_source_cidrs` only), `fm-web` (no host: the FM admin is reached through the site's admin mount); the origin-live lock (below); ALB↔tasks SG rules | Route 53 zone `gkoi.com`; secret `gkoi/edge/live-origin`; network state |
 | `data` | RDS PostgreSQL 16 `gkoi-prod2-pg` (db.t4g.small, single-AZ, gp3 20→100 GiB, encrypted, 7-day backups, deletion protection, master password managed by RDS in Secrets Manager, parameter group `rds.force_ssl=1` + slow/lock/temp/autovacuum/connection logging, logs to CloudWatch 30 days); ElastiCache Valkey 8 `gkoi-prod2-valkey` (one cache.t4g.small, `maxmemory-policy noeviction`, TLS + at-rest encryption, auth token in `gkoi/prod2/valkey` with a `rediss://` URL, slow-log to CloudWatch); EFS `gkoi-prod2-cms` (encrypted, general purpose, elastic throughput, AWS Backup on, TLS-only policy) + the access point `/cms-content` at uid/gid 33; SGs: each store admits only the ECS tasks SG | network state |
 | `registry` | ECR `gkoi/{cms-server, cms-nginx, engine-api, engine-worker, engine-web, media-agent, media-origin, mediamtx, fm-api, fm-worker, fm-web, warroom-game}` (immutable tags, scan on push, keep last 20); registry replication of `gkoi/*` to euc1 + use1 with creation templates there; CodeBuild `gkoi-build-{aisolver-www, mikaido, filemanager}` (privileged, BUILD_GENERAL1_LARGE, S3 source `<repo>/source.zip`, local Docker layer cache), each with role `/gkoi/gkoi-build-<repo>` (read `<repo>/*`, read/write `cache/<repo>/*`, push its own repos, write `/gkoi/codebuild/<repo>`) | bucket `gkoi-build-sources-127214190346` |
 | `observability` | Log groups (30 days): `/gkoi/prod2/ecs/<service>`, `/gkoi/prod2/ops`, `/gkoi/prod2/{media,game}/<region>/{container,syslog,bootstrap}` per enabled region; dashboard `gkoi-prod2` (ALB, RDS, Valkey, EFS); alarms → `gkoi-ops-alerts` (usw2): RDS CPU / storage / memory / connections, Valkey memory / CPU, ALB 5xx, per-target-group unhealthy hosts, EFS IO limit | the `gkoi-ops-alerts` topics; network, edge-alb and data state |
@@ -121,7 +121,25 @@ Cheaper knobs if wanted: endpoints in one AZ only (~−$65), drop flow logs to `
   `allow_overwrite` adopts it unchanged — but destroying this stack would then delete it and stop that other cert's renewal.
   No other record in the zone is touched; the ALB's own hostnames are NOT pointed at it here (that is the P3/P4 cut-over).
 - **edge-alb, the secret format:** `gkoi/edge/live-origin` is read as a plain string. If it is JSON, set
-  `live_origin_secret_json_key`. The value lands in this stack's (encrypted) state.
+  `live_origin_secret_json_key`. The value lands in this stack's (encrypted) state. Terraform only READS it (a data source — no
+  `random_password`, no `aws_secretsmanager_secret_version`): an apply never writes it. After its value is changed (audit
+  B3-4), re-apply edge-alb (rules 10–12 carry the value and update in place) and force a new engine-api deployment (the
+  edge reads it at task start).
+- **edge-alb, the cms hosts (audit 2026-11-11 B4-2/3/4).** Prod's host nginx on the site box fronted the container nginx
+  per name. The ALB reproduces: `origin-cdn` → only `/content/*` + `/assets/*` GET/HEAD (else 403 on those paths, 404
+  elsewhere); `origin-labs` → `/content/labs/*` GET/HEAD, other GET/HEAD 302 to `https://www.gkoi.com/labs`, other
+  methods 403; `gkoi.com` → 301 to `www`; `origin-www` + `www` → the whole site. It can NOT (provider < 6.0 has no rule
+  `transform`): rewrite Host — so `origin-cdn` / `origin-www` / `origin-labs` reach the container nginx's DEFAULT (main)
+  server, and the LABS server block (`server_name labs.invalid ${LABS_HOST}`) is never chosen: isolated-mode Labs builds
+  lose their COOP/COEP/DIP headers until aisolver-www names the origin host there (or CloudFront labs forwards Host
+  `labs.gkoi.com` and that name joins the cms hosts + certificate); nor strip `Cookie` / `Set-Cookie` /
+  `X-Labs-Isolation` (harmless while no `CMS_LABS_ISOLATION_TOKEN` is set: no header value can match an empty token map).
+- **edge-alb, the files allow-list (audit B3-6).** `files.gkoi.com`: `fm_public_paths` (prod's public listener:
+  `/api/v1/app/*`, `/thumbs/*`, `/api/v1/healthz`, `/api/v1/readyz`) for everyone; every other path only from
+  `cms_source_cidrs` (the Lightsail site box until P4, then the home NAT — which EVERY ECS task leaves by, the engine
+  pilot included); else 404. Prod's nginx also refused dot-segment / `%2e` / `%2f` / `//` paths before routing; the ALB
+  matches the raw path with no such guard: probe `curl --path-as-is https://files.gkoi.com/api/v1/app/../admin/…` after
+  the apply (an ALB rule refusing those shapes is a possible follow-up).
 - **registry, replication:** ECR replication is ONE registry-wide setting per region. This stack owns it in us-west-2; an
   existing replication configuration there (old workloads) would be replaced. Check with `ecr describe-registry` first.
 - **data:** deletion protection is on and a final snapshot is taken; `terraform destroy` will fail until it is turned off.

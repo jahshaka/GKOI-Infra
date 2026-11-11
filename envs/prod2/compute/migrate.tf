@@ -54,7 +54,8 @@ locals {
       echo "content-sync: start (delete=$${RSYNC_DELETE:-0})"
       rsync -rlt --omit-dir-times --no-perms --no-owner --no-group --partial --stats $extra \
         -e "ssh -i /root/.ssh/id -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes -o ServerAliveInterval=30" \
-        "root@$SYNC_HOST:/" /data/content/ | tail -n 20
+        "root@$SYNC_HOST:/" /data/content/ > /tmp/rsync.log 2>&1 || { rc=$?; tail -n 30 /tmp/rsync.log; echo "CONTENT_SYNC_FAILED rsync exit $rc"; exit "$rc"; }
+      tail -n 20 /tmp/rsync.log
       echo "content-sync: files on EFS: $(find /data/content -type f | wc -l)"
       echo "CONTENT_SYNC_OK"
     EOS

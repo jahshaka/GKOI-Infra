@@ -123,16 +123,26 @@ locals {
       POSTGRES_USER       = lookup(merge(local.default_engine_env, var.engine_env), "POSTGRES_APP_USER", "mikaido_app")
       S3_BUCKET           = var.engine_vod_bucket
       CDN_DISTRIBUTION_ID = length(var.engine_cloudfront_distribution_ids) > 0 ? var.engine_cloudfront_distribution_ids[0] : ""
-      # With the edge sidecar the api's only proxy is 127.0.0.1 (the edge rebuilds X-Forwarded-For); without it the
-      # ALB nodes (in this VPC) write X-Forwarded-For.
-      TRUSTED_PROXIES = var.engine_edge_sidecar ? "127.0.0.1" : local.vpc_cidr
+      # With the edge sidecar the api's first proxy is 127.0.0.1 (the edge rebuilds X-Forwarded-For); without it the
+      # ALB nodes (in this VPC) write X-Forwarded-For. PLUS the CMS's addresses (audit B3-5, prod: TRUSTED_PROXIES =
+      # the edge + 172.26.10.107/32): the edge keeps the allow-listed CMS's chain `<viewer>, <cms>` and appends <cms>
+      # again, so the api walks past the CMS hops down to the viewer the CMS wrote. Any other caller's chain is its
+      # own socket address only (edge-maps-cidr.conf.template), so this trusts nothing a stranger writes.
+      TRUSTED_PROXIES = join(",", concat([var.engine_edge_sidecar ? "127.0.0.1" : local.vpc_cidr], var.cms_source_cidrs))
     },
     local.default_engine_env,
     var.engine_env,
   )
 
   engine_edge_env = merge(
-    { EDGE_REALIP_FROM = local.vpc_cidr },
+    {
+      EDGE_REALIP_FROM = local.vpc_cidr
+      # The CMS-IP allow-list (audit B3-5; prod: the site box). Behind the ALB (REALIP_MODE=alb) the edge's realip
+      # walks X-Forwarded-For right to left past EDGE_REALIP_FROM, so these are matched against the address the ALB
+      # appended — the caller's own. _2 = _1 when only one is given (the sidecar's default too).
+      EDGE_ALLOW_CIDR   = var.cms_source_cidrs[0]
+      EDGE_ALLOW_CIDR_2 = length(var.cms_source_cidrs) > 1 ? var.cms_source_cidrs[1] : var.cms_source_cidrs[0]
+    },
     local.default_engine_edge_env,
     var.engine_edge_env,
   )
@@ -241,4 +251,13 @@ resource "aws_secretsmanager_secret" "app" {
 resource "aws_cloudwatch_log_group" "engine_edge" {
   name              = "/gkoi/prod2/ecs/engine-edge"
   retention_in_days = 30
+}
+
+# After P4 the CMS (and every ECS task) reaches engine.gkoi.com / files.gkoi.com from the home NAT: warn when the
+# network stack's NAT addresses are not all in cms_source_cidrs (the edge would 403 the CMS).
+check "cms_source_cidrs_cover_nat" {
+  assert {
+    condition     = alltrue([for ip in local.net.home_nat_public_ips : contains(var.cms_source_cidrs, "${ip}/32")])
+    error_message = "cms_source_cidrs does not hold every home NAT address (network output home_nat_public_ips) as /32."
+  }
 }

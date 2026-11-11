@@ -338,3 +338,21 @@ variable "parked" {
   type        = bool
   default     = true
 }
+
+variable "cms_source_cidrs" {
+  description = <<-EOT
+    The CMS's source addresses as engine.gkoi.com / files.gkoi.com see them (audit 2026-11-11 B3-5): the Lightsail site
+    box (52.24.67.48, until P4) and the home NAT (32.189.104.202 — after P4 the CMS on ECS leaves by it; so does every
+    other ECS task). The engine edge's EDGE_ALLOW_CIDR / _2 and the api's TRUSTED_PROXIES. edge-alb has the same
+    variable (the files allow-list) — keep the two equal. 1–2 IPv4 CIDRs (the edge template takes two).
+  EOT
+  type        = list(string)
+  default     = ["52.24.67.48/32", "32.189.104.202/32"]
+  validation {
+    condition = (
+      length(var.cms_source_cidrs) >= 1 && length(var.cms_source_cidrs) <= 2 &&
+      alltrue([for c in var.cms_source_cidrs : can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/([89]|[12][0-9]|3[0-2])$", c)) && can(cidrhost(c, 0))])
+    )
+    error_message = "cms_source_cidrs: 1–2 IPv4 CIDRs, prefix /8–/32 (the api refuses a wider TRUSTED_PROXIES entry)."
+  }
+}
