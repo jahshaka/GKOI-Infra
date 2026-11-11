@@ -16,6 +16,15 @@ data "terraform_remote_state" "network" {
   }
 }
 
+data "terraform_remote_state" "edge" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket
+    key    = "prod2/edge-alb/terraform.tfstate"
+    region = "us-west-2"
+  }
+}
+
 data "terraform_remote_state" "data" {
   backend = "s3"
   config = {
@@ -35,10 +44,12 @@ data "terraform_remote_state" "observability" {
 }
 
 locals {
-  net      = data.terraform_remote_state.network.outputs
-  data     = data.terraform_remote_state.data.outputs
-  obs      = data.terraform_remote_state.observability.outputs
-  home_key = module.regions.home_key
+  net  = data.terraform_remote_state.network.outputs
+  data = data.terraform_remote_state.data.outputs
+  obs  = data.terraform_remote_state.observability.outputs
+  # edge-alb's internal ALB (the media boxes' path to the engine api's /internal/**); null until edge-alb has it
+  engine_internal = try(data.terraform_remote_state.edge.outputs.engine_internal, null)
+  home_key        = module.regions.home_key
 
   # Enabled = asked for here AND the region is enabled in the catalogue (its VPC exists).
   enabled = { for k, v in var.media_regions : k => v if v.enabled && contains(keys(module.regions.enabled), k) }
@@ -65,8 +76,18 @@ locals {
   bundle_prefix = "${var.bundle_prefix}/"
 
   # ---- the engine's private api address -------------------------------------------------------------------------
-  portal_internal_url = var.engine_internal_url_override != "" ? var.engine_internal_url_override : (
-    var.create_engine_internal_alb ? "http://${aws_lb.engine_internal[0].dns_name}:3000" : ""
+  portal_internal_url = var.engine_internal_url_override != "" ? var.engine_internal_url_override : try(local.engine_internal.url, "")
+
+  # ---- the media origin's nginx: our ECR mirror (gkoi/ci-nginx, replicated) by the digest each region's replica has
+  origin_image = {
+    for k, v in local.enabled : k => var.media_origin_image_override != "" ? var.media_origin_image_override : (
+      "${var.account_id}.dkr.ecr.${module.regions.all[k].region}.amazonaws.com/${var.media_origin_ecr_repo}@${local.origin_digest[k]}"
+    )
+  }
+  origin_digest = merge(
+    length(data.aws_ecr_image.origin_usw2) > 0 ? { usw2 = data.aws_ecr_image.origin_usw2[0].image_digest } : {},
+    length(data.aws_ecr_image.origin_euc1) > 0 ? { euc1 = data.aws_ecr_image.origin_euc1[0].image_digest } : {},
+    length(data.aws_ecr_image.origin_use1) > 0 ? { use1 = data.aws_ecr_image.origin_use1[0].image_digest } : {},
   )
 
   agent_env = merge({
@@ -104,7 +125,7 @@ locals {
       images = {
         media-agent  = "${var.account_id}.dkr.ecr.${module.regions.all[k].region}.amazonaws.com/gkoi/media-agent${startswith(local.image_ref["media-agent"], "sha256:") ? "@" : ":"}${local.image_ref["media-agent"]}"
         mediamtx     = "${var.account_id}.dkr.ecr.${module.regions.all[k].region}.amazonaws.com/gkoi/mediamtx${startswith(local.image_ref["mediamtx"], "sha256:") ? "@" : ":"}${local.image_ref["mediamtx"]}"
-        media-origin = var.media_origin_image
+        media-origin = local.origin_image[k]
       }
       engine_source = local.engine_source
       bundle = {
@@ -153,7 +174,7 @@ locals {
     "arn:aws:s3:::${var.bundle_bucket}/mikaido/*/source.zip",
   ]
   recordings_buckets = distinct(concat([var.recordings_bucket], var.extra_vod_buckets))
-  ecr_repositories   = ["gkoi/media-agent", "gkoi/mediamtx", "gkoi/media-origin"]
+  ecr_repositories   = distinct(["gkoi/media-agent", "gkoi/mediamtx", var.media_origin_ecr_repo])
 }
 
 # The plan stops here, naming what is missing, before anything is created (a failed precondition fails the plan).
@@ -170,13 +191,35 @@ resource "terraform_data" "preflight" {
     }
     precondition {
       condition     = local.portal_internal_url != ""
-      error_message = "No PORTAL_INTERNAL_URL: keep create_engine_internal_alb = true or set engine_internal_url_override."
+      error_message = "No PORTAL_INTERNAL_URL: apply edge-alb (its engine_internal output — the internal ALB) first, or set engine_internal_url_override."
     }
     precondition {
       condition     = length(local.enabled) == length({ for k, v in var.media_regions : k => v if v.enabled })
       error_message = "A media region is enabled here but paused in modules/regions (no VPC): ${join(", ", [for k, v in var.media_regions : k if v.enabled && !contains(keys(module.regions.enabled), k)])}."
     }
   }
+}
+
+# --- the media origin's image in each box region's ECR (a missing push / replica stops the plan here) -----------
+
+data "aws_ecr_image" "origin_usw2" {
+  count           = var.media_origin_image_override == "" && contains(keys(local.enabled), "usw2") ? 1 : 0
+  repository_name = var.media_origin_ecr_repo
+  image_tag       = var.media_origin_image_tag
+}
+
+data "aws_ecr_image" "origin_euc1" {
+  count           = var.media_origin_image_override == "" && contains(keys(local.enabled), "euc1") ? 1 : 0
+  provider        = aws.euc1
+  repository_name = var.media_origin_ecr_repo
+  image_tag       = var.media_origin_image_tag
+}
+
+data "aws_ecr_image" "origin_use1" {
+  count           = var.media_origin_image_override == "" && contains(keys(local.enabled), "use1") ? 1 : 0
+  provider        = aws.use1
+  repository_name = var.media_origin_ecr_repo
+  image_tag       = var.media_origin_image_tag
 }
 
 # --- the secrets (EXISTING, us-west-2 — read by ARN; values never enter this state) -----------------------------
@@ -310,7 +353,7 @@ module "box_use1" {
 }
 
 # --- Valkey (data stack) from the home box: a same-VPC SG reference. The spoke boxes come in through the data
-# stack's valkey_peer_cidrs (cross-region peering cannot reference a security group) — README "Apply order". ------
+# stack's valkey_peer_cidrs (default: network's edge_cidrs — cross-region peering cannot reference an SG). ---------
 
 resource "aws_vpc_security_group_ingress_rule" "valkey_from_home_box" {
   count                        = length(module.box_usw2)
@@ -319,5 +362,17 @@ resource "aws_vpc_security_group_ingress_rule" "valkey_from_home_box" {
   ip_protocol                  = "tcp"
   from_port                    = 6379
   to_port                      = 6379
+  referenced_security_group_id = module.box_usw2[0].security_group_id
+}
+
+# --- the usw2 box → edge-alb's internal ALB (same VPC: an SG reference; the spokes are admitted by CIDR there) -------
+
+resource "aws_vpc_security_group_ingress_rule" "engine_internal_from_home_box" {
+  count                        = length(module.box_usw2) > 0 && local.engine_internal != null ? 1 : 0
+  security_group_id            = local.engine_internal.security_group_id
+  description                  = "usw2 media box → engine internal ALB (3000)"
+  ip_protocol                  = "tcp"
+  from_port                    = 3000
+  to_port                      = 3000
   referenced_security_group_id = module.box_usw2[0].security_group_id
 }

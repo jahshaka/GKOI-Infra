@@ -26,19 +26,19 @@ output "portal_internal_url" {
   value       = local.portal_internal_url
 }
 
-output "engine_internal_target_group_arn" {
-  description = "COMPUTE must register the engine-api service's `api` container (port 3000) here (README 'Cross-stack')."
-  value       = var.create_engine_internal_alb ? aws_lb_target_group.engine_internal[0].arn : null
-}
 
 output "valkey_peer_cidrs" {
-  description = "Put these in the DATA stack's valkey_peer_cidrs (the spoke boxes reach Valkey over peering by CIDR)."
+  description = "The spoke VPCs that must reach Valkey — the data stack admits network's edge_cidrs by default (valkey_peer_cidrs = null)."
   value       = [for k, v in local.enabled : local.net.regions[k].cidr if k != local.home_key]
 }
 
 output "bundle" {
   description = "Where the box bundle went (s3://<bucket>/<prefix>) — the boxes read it from their config parameter."
   value       = "s3://${var.bundle_bucket}/${local.bundle_prefix}"
+}
+
+output "media_origin_images" {
+  value = local.origin_image
 }
 
 output "engine_release" {

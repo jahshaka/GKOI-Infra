@@ -55,6 +55,8 @@ locals {
   tasks_sg = [local.net.ecs_tasks_security_group_id]
   vpc_cidr = local.net.home_cidr
   tg       = local.edge.target_groups
+  # edge-alb's internal ALB target group for the media boxes (P5); null while edge-alb has no such output yet, or off.
+  engine_internal_tg = var.engine_internal_lb ? try(local.edge.engine_internal.target_group_arn, null) : null
 
   # --- images ------------------------------------------------------------------------------------------------
   # envs/prod2/releases/<repo>.json (gkoi-release): { images: { <name>: { digest, image } } }; var.images wins.

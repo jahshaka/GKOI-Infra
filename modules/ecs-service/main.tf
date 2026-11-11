@@ -89,6 +89,16 @@ variable "load_balancer" {
   default = null
 }
 
+variable "extra_load_balancers" {
+  description = "More target groups the same service registers in (e.g. engine-api's api:3000 in the INTERNAL ALB for the media boxes). ECS allows 5 in all."
+  type = list(object({
+    target_group_arn = string
+    container_name   = string
+    container_port   = number
+  }))
+  default = []
+}
+
 variable "health_check_grace_period_seconds" {
   description = "With a load balancer only: how long ECS ignores a failing target-group health check after a start."
   type        = number
@@ -211,7 +221,7 @@ resource "aws_ecs_service" "this" {
   }
 
   dynamic "load_balancer" {
-    for_each = var.load_balancer == null ? [] : [var.load_balancer]
+    for_each = concat(var.load_balancer == null ? [] : [var.load_balancer], var.extra_load_balancers)
     content {
       target_group_arn = load_balancer.value.target_group_arn
       container_name   = load_balancer.value.container_name
@@ -219,7 +229,7 @@ resource "aws_ecs_service" "this" {
     }
   }
 
-  health_check_grace_period_seconds = var.load_balancer == null ? null : var.health_check_grace_period_seconds
+  health_check_grace_period_seconds = var.load_balancer == null && length(var.extra_load_balancers) == 0 ? null : var.health_check_grace_period_seconds
 
   # The autoscaling target owns the running count between min and max.
   lifecycle {

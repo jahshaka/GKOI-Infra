@@ -42,11 +42,11 @@ The state bucket, lock table, runner project and its role were created by hand i
 | Stack | Creates | Reads (never changes) |
 |---|---|---|
 | `network` | A VPC per enabled region (usw2 10.10/16, euc1 10.20/16, use1 10.30/16; apne1 10.40/16 when enabled), 2 AZs, public + private /20s, IGW; ONE NAT gateway in usw2 (`home_nat_mode = per_az` for one per AZ); S3 gateway endpoint everywhere; interface endpoints in usw2 (ecr.api, ecr.dkr, secretsmanager, logs, ssm, ssmmessages, ec2messages, kms, sts); peering usw2 ↔ each spoke with routes in every route table; flow logs (ALL, 10-min aggregation) to `/gkoi/prod2/vpc-flow/<region>` (7 days) + the role `/gkoi/gkoi-prod2-vpc-flow-logs`; each VPC's default SG locked; the shared `gkoi-prod2-ecs-tasks` SG | — |
-| `edge-alb` | The public ALB `gkoi-prod2-alb` (usw2, 2 AZs, deletion protection on); an ACM cert for engine / files / origin-www / origin-cdn / origin-labs / origin-live `.gkoi.com` with its DNS-validation CNAMEs; HTTP→HTTPS 301; HTTPS default 404; host rules → target groups `cms` (origin-www/cdn/labs + www; the apex 301s to www), `engine-api` (engine), `fm-api` (files: public paths for all, the rest from `cms_source_cidrs` only), `fm-web` (no host: the FM admin is reached through the site's admin mount); the origin-live lock (below); ALB↔tasks SG rules | Route 53 zone `gkoi.com`; secret `gkoi/edge/live-origin`; network state |
+| `edge-alb` | The public ALB `gkoi-prod2-alb` (usw2, 2 AZs, deletion protection on); an ACM cert for engine / files / origin-www / origin-cdn / origin-labs / origin-live `.gkoi.com` with its DNS-validation CNAMEs; HTTP→HTTPS 301; HTTPS default 404; host rules → target groups `cms` (origin-www/cdn/labs + www; the apex 301s to www), `engine-api` (engine), `fm-api` (files: public paths for all, the rest from `cms_source_cidrs` only), `fm-web` (no host: the FM admin is reached through the site's admin mount); the origin-live lock (below); ALB↔tasks SG rules; the INTERNAL ALB `gkoi-prod2-engine-internal` (:3000, `/internal/*` + health → target group `gkoi-prod2-engine-api-int`; from every peered edge VPC — the media boxes' path to the engine api, output `engine_internal`) | Route 53 zone `gkoi.com`; secret `gkoi/edge/live-origin`; network state |
 | `data` | RDS PostgreSQL 16 `gkoi-prod2-pg` (db.t4g.small, single-AZ, gp3 20→100 GiB, encrypted, 7-day backups, deletion protection, master password managed by RDS in Secrets Manager, parameter group `rds.force_ssl=1` + slow/lock/temp/autovacuum/connection logging, logs to CloudWatch 30 days); ElastiCache Valkey 8 `gkoi-prod2-valkey` (one cache.t4g.small, `maxmemory-policy noeviction`, TLS + at-rest encryption, auth token in `gkoi/prod2/valkey` with a `rediss://` URL, slow-log to CloudWatch); EFS `gkoi-prod2-cms` (encrypted, general purpose, elastic throughput, AWS Backup on, TLS-only policy) + the access point `/cms-content` at uid/gid 33; SGs: each store admits only the ECS tasks SG | network state |
 | `registry` | ECR `gkoi/{cms-server, cms-nginx, engine-api, engine-worker, engine-web, media-agent, media-origin, mediamtx, fm-api, fm-worker, fm-web, warroom-game}` (immutable tags, scan on push, keep last 20); registry replication of `gkoi/*` to euc1 + use1 with creation templates there; CodeBuild `gkoi-build-{aisolver-www, mikaido, filemanager}` (privileged, BUILD_GENERAL1_LARGE, S3 source `<repo>/source.zip`, local Docker layer cache), each with role `/gkoi/gkoi-build-<repo>` (read `<repo>/*`, read/write `cache/<repo>/*`, push its own repos, write `/gkoi/codebuild/<repo>`) | bucket `gkoi-build-sources-127214190346` |
 | `observability` | Log groups (30 days): `/gkoi/prod2/ecs/<service>`, `/gkoi/prod2/ops`, `/gkoi/prod2/{media,game}/<region>/{container,syslog,bootstrap}` per enabled region; dashboard `gkoi-prod2` (ALB, RDS, Valkey, EFS); alarms → `gkoi-ops-alerts` (usw2): RDS CPU / storage / memory / connections, Valkey memory / CPU, ALB 5xx, per-target-group unhealthy hosts, EFS IO limit | the `gkoi-ops-alerts` topics; network, edge-alb and data state |
-| `media` | Per enabled media region (usw2 default; euc1 / use1 by a map): an ASG of ONE EC2 media box (`m7i.xlarge`, Ubuntu 24.04, SSM only), its EIP, SGs (public RTMPS / ICE / CloudFront→443; the engine's private pool ports), role `/gkoi/gkoi-prod2-media-<key>`, `/gkoi/prod2/media/<key>/config`, rehearsal A records, alarms; once: the box bundle in the sources bucket, the INTERNAL ALB `gkoi-prod2-engine-internal` (the boxes' `/internal/**` path to the engine api), the Valkey rule for the usw2 box. README in `envs/prod2/media/` | network, data, observability state; the engine + origin-verify secrets (ARNs); `releases/mikaido.json`; zone `gkoi.com` |
+| `media` | Per enabled media region (usw2, euc1, use1 — all three by default; a map turns one off): an ASG of ONE EC2 media box (`m7i.xlarge`, Ubuntu 24.04, SSM only), its EIP, SGs (public RTMPS / ICE / CloudFront→443; the engine's private pool ports), role `/gkoi/gkoi-prod2-media-<key>`, `/gkoi/prod2/media/<key>/config`, rehearsal A records, alarms; once: the box bundle in the sources bucket, the usw2 box's rules on Valkey + the internal ALB. README in `envs/prod2/media/` | network, edge-alb (`engine_internal`), data, observability state; `gkoi/ci-nginx` in each region's ECR; the engine + origin-verify secrets (ARNs); `releases/mikaido.json`; zone `gkoi.com` |
 | `compute` | ECS cluster `gkoi-prod2` (Container Insights, FARGATE); services `cms`, `engine-api`, `engine-worker`, `fm-api`, `fm-worker`, `fm-web`; migrator task definitions `gkoi-prod2-{cms,engine,fm}-migrate`; 25 EMPTY secrets `gkoi/prod2/<app>/<NAME>`; execution roles `/gkoi/gkoi-prod2-exec-{cms,engine,fm}` + task roles `/gkoi/gkoi-prod2-task-*`; log group `/gkoi/prod2/ecs/engine-edge` | network, edge-alb, data, registry state; the existing `gkoi/edge/live-origin` secret (ARN only); the buckets `gkoi-beta-vods` / `gkoi-beta-files`; observability's log groups |
 
 **Service counts.** The services live in `compute`. `edge-alb`'s `services` variable carries each control-plane service's
@@ -70,8 +70,8 @@ before origin-live moves to the ALB in P3.
 4. `registry` (independent — any time)
 5. `observability` (reads network, edge-alb and data)
 6. `compute` (last: reads network, edge-alb, data and registry; writes into observability's log groups)
-7. `media` (P5: reads network, data, observability; then compute registers the api in its internal target group and
-   data's `valkey_peer_cidrs` takes its spoke CIDRs — `envs/prod2/media/README.md` "Apply order")
+7. `media` (P5: after edge-alb's internal ALB, compute's registration in it, data's spoke Valkey rules and the
+   `gkoi/ci-nginx` mirror push — `envs/prod2/media/README.md` "Apply order")
 
 Each stack: `plan`, read the summary, then `apply` (which re-plans and applies exactly that saved plan).
 
@@ -143,8 +143,8 @@ Cheaper knobs if wanted: endpoints in one AZ only (~−$65), drop flow logs to `
 - **registry, replication:** ECR replication is ONE registry-wide setting per region. This stack owns it in us-west-2; an
   existing replication configuration there (old workloads) would be replaced. Check with `ecr describe-registry` first.
 - **data:** deletion protection is on and a final snapshot is taken; `terraform destroy` will fail until it is turned off.
-- **Valkey from the media boxes (P5):** the media agent needs `REDIS_URL`; add the peered VPC CIDRs to `valkey_peer_cidrs`
-  (the network stack's `edge_cidrs` output) when that phase starts.
+- **Valkey from the media boxes (P5):** the media agent needs `REDIS_URL`; `valkey_peer_cidrs` defaults (null) to the
+  network stack's `edge_cidrs` (Frankfurt + Virginia); the usw2 box gets an SG-referenced rule from the media stack.
 
 ## The compute stack (`envs/prod2/compute`)
 
@@ -201,8 +201,9 @@ CDN_PRIVATE_KEY_B64. Optional: `extra_secrets = { cms = ["CMS_LABS_ISOLATION_TOK
 Plain env: the defaults are in `env-defaults.tf`; the `*_env` variables are merged on top (one key at a time). The data
 addresses (RDS endpoint, buckets, the VPC CIDR) come from state. `__SET_ME__` marks what only the prod box knows (the
 CMS DB name/role, `SESSION_COOKIE_NAME` — must equal prod's or everyone is signed out once —, the SMTP set,
-`RELAY_POOL_INSTANCES`, `MK_POOL_API_USER`, the platform client ids, the FM's `CDN_KEY_PAIR_ID`): pass them in a git-ignored
-`*.tfvars` or `-var`, never a secret.
+`MK_POOL_API_USER`, the platform client ids, the FM's `CDN_KEY_PAIR_ID`): pass them in a git-ignored
+`*.tfvars` or `-var`, never a secret. The engine runs `RELAY_REGISTRY_ONLY=1` with NO `RELAY_POOL_INSTANCES`: the media
+boxes register their pools (envs/prod2/media); never pass the Lightsail list here.
 
 ### Migrate, then update
 

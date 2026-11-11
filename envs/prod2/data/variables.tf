@@ -84,9 +84,14 @@ variable "valkey_parameter_family" {
 }
 
 variable "valkey_peer_cidrs" {
-  description = "Extra CIDRs allowed to Valkey (e.g. the peered media VPCs once the media boxes need REDIS_URL, P5). Default: none — only the ECS tasks SG."
+  description = <<-EOT
+    CIDRs allowed to Valkey besides the ECS tasks SG. null (default) = every peered edge VPC from the network stack's
+    edge_cidrs (Frankfurt 10.20/16, Virginia 10.30/16; Tokyo once enabled): the media boxes there need REDIS_URL (the
+    relay queues + the pool registry, P5). The usw2 media box gets an SG-referenced rule from the media stack instead.
+    [] = none. The token (TLS + auth) still gates every connection.
+  EOT
   type        = list(string)
-  default     = []
+  default     = null
 }
 
 # --- EFS -------------------------------------------------------------------------------------------------------

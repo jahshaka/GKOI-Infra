@@ -156,3 +156,9 @@ variable "fm_public_paths" {
   type        = list(string)
   default     = ["/api/v1/app/*", "/thumbs/*", "/api/v1/healthz", "/api/v1/readyz"]
 }
+
+variable "create_engine_internal_alb" {
+  description = "The internal ALB the media boxes reach the engine api's /internal/** through (internal-alb.tf; P5)."
+  type        = bool
+  default     = true
+}

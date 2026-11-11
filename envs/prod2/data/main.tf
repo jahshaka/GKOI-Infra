@@ -153,7 +153,7 @@ resource "aws_vpc_security_group_ingress_rule" "valkey_from_tasks" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "valkey_from_peers" {
-  for_each          = toset(var.valkey_peer_cidrs)
+  for_each          = toset(var.valkey_peer_cidrs != null ? var.valkey_peer_cidrs : values(local.net.edge_cidrs))
   security_group_id = aws_security_group.valkey.id
   description       = "Valkey from a peered VPC"
   ip_protocol       = "tcp"

@@ -37,7 +37,7 @@ variable "build_projects" {
 }
 
 variable "extra_repositories" {
-  description = "Repos no build project pushes, pushed once by the orchestrator: ci-minio = our pinned copy of the MinIO test image (gone from Docker Hub); postgres + aws-cli = the db-restore task's mirrors (postgres:16.15-alpine, amazon/aws-cli:2.22.35)."
+  description = "Repos no build project pushes, pushed once by the orchestrator: ci-minio = our pinned copy of the MinIO test image (gone from Docker Hub); postgres + aws-cli = the db-restore task's mirrors (postgres:16.15-alpine, amazon/aws-cli:2.22.35); nginx = the media origin's image (nginx:1.27-alpine, the live media box's; envs/prod2/media)."
   type        = list(string)
-  default     = ["ci-minio", "ci-postgres", "ci-aws-cli"]
+  default     = ["ci-minio", "ci-postgres", "ci-aws-cli", "ci-nginx"]
 }

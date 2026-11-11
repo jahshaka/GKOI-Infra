@@ -24,6 +24,9 @@ mock_provider "aws" {
   mock_resource "aws_eip" {
     defaults = { public_ip = "198.51.100.7", allocation_id = "eipalloc-0123" }
   }
+  mock_data "aws_ecr_image" {
+    defaults = { image_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+  }
   mock_data "aws_secretsmanager_secret" {
     defaults = { arn = "arn:aws:secretsmanager:us-west-2:127214190346:secret:gkoi/x-AbCdEf" }
   }
@@ -50,6 +53,9 @@ mock_provider "aws" {
   }
   mock_resource "aws_eip" {
     defaults = { public_ip = "198.51.100.7", allocation_id = "eipalloc-0123" }
+  }
+  mock_data "aws_ecr_image" {
+    defaults = { image_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
   }
   mock_data "aws_secretsmanager_secret" {
     defaults = { arn = "arn:aws:secretsmanager:us-west-2:127214190346:secret:gkoi/x-AbCdEf" }
@@ -78,6 +84,9 @@ mock_provider "aws" {
   mock_resource "aws_eip" {
     defaults = { public_ip = "198.51.100.7", allocation_id = "eipalloc-0123" }
   }
+  mock_data "aws_ecr_image" {
+    defaults = { image_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+  }
   mock_data "aws_secretsmanager_secret" {
     defaults = { arn = "arn:aws:secretsmanager:us-west-2:127214190346:secret:gkoi/x-AbCdEf" }
   }
@@ -96,6 +105,19 @@ override_data {
         usw2 = { cidr = "10.10.0.0/16", vpc_id = "vpc-home", public_subnet_ids = ["subnet-a", "subnet-b"] }
         euc1 = { cidr = "10.20.0.0/16", vpc_id = "vpc-euc1", public_subnet_ids = ["subnet-c", "subnet-d"] }
         use1 = { cidr = "10.30.0.0/16", vpc_id = "vpc-use1", public_subnet_ids = ["subnet-e", "subnet-f"] }
+      }
+    }
+  }
+}
+override_data {
+  target = data.terraform_remote_state.edge
+  values = {
+    outputs = {
+      engine_internal = {
+        target_group_arn  = "arn:aws:elasticloadbalancing:us-west-2:127214190346:targetgroup/gkoi-prod2-engine-api-int/1"
+        dns_name          = "internal-gkoi-prod2-engine-internal-1.us-west-2.elb.amazonaws.com"
+        url               = "http://internal-gkoi-prod2-engine-internal-1.us-west-2.elb.amazonaws.com:3000"
+        security_group_id = "sg-internal"
       }
     }
   }
@@ -139,8 +161,12 @@ run "all_three" {
     error_message = "source"
   }
   assert {
-    condition     = length(aws_vpc_security_group_ingress_rule.engine_internal_spokes) == 2
-    error_message = "spokes"
+    condition     = length(aws_vpc_security_group_ingress_rule.engine_internal_from_home_box) == 1 && local.config.usw2.portal_internal_url == "http://internal-gkoi-prod2-engine-internal-1.us-west-2.elb.amazonaws.com:3000"
+    error_message = "internal ALB"
+  }
+  assert {
+    condition     = local.config.euc1.images["media-origin"] == "127214190346.dkr.ecr.eu-central-1.amazonaws.com/gkoi/ci-nginx@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    error_message = "origin image"
   }
   assert {
     condition     = length(jsonencode(local.config.use1)) < 3500
@@ -156,16 +182,25 @@ run "all_three" {
   }
 }
 
-run "usw2_only_default" {
+run "default_three_regions" {
   command = apply
   assert {
-    condition     = length(module.box_usw2) == 1 && length(module.box_euc1) == 0
-    error_message = "default"
+    condition     = length(module.box_usw2) == 1 && length(module.box_euc1) == 1 && length(module.box_use1) == 1
+    error_message = "default = three regions"
   }
   assert {
-    condition     = output.valkey_peer_cidrs == []
-    error_message = "no spokes"
+    condition     = jsonencode(output.valkey_peer_cidrs) == jsonencode(["10.20.0.0/16", "10.30.0.0/16"])
+    error_message = "spokes"
   }
+}
+
+run "no_internal_alb_yet" {
+  command = plan
+  override_data {
+    target = data.terraform_remote_state.edge
+    values = { outputs = {} }
+  }
+  expect_failures = [terraform_data.preflight]
 }
 
 run "bad_pool_count" {

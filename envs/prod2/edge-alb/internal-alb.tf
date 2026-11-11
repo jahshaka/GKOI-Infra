@@ -8,9 +8,10 @@
 # edge), forwarding ONLY /internal/* and the health path. Its DNS name is public DNS resolving to private addresses,
 # so a box in any peered VPC uses it with no DNS plumbing; inter-region peering traffic is encrypted by AWS.
 #
-# NEEDS A COMPUTE CHANGE (not made here — README "Cross-stack"): the engine-api service must register its `api`
-# container (port 3000) in this target group as a SECOND load balancer (modules/ecs-service takes one today).
-# Until then the target group is empty and every agent call answers 503.
+# Here (not in the media stack) because this stack owns the load balancers and target groups and compute registers the
+# services in them (output engine_internal → compute's engine-api `extra_load_balancers`): network → edge-alb → compute
+# → media, no stack reading a later one. Who may connect: every peered media/game VPC (network's edge_cidrs) and the
+# usw2 media box's own SG (a rule the MEDIA stack adds to this SG — the box lives in the home VPC).
 
 resource "aws_security_group" "engine_internal" {
   count       = var.create_engine_internal_alb ? 1 : 0
@@ -20,20 +21,10 @@ resource "aws_security_group" "engine_internal" {
   tags        = { Name = "gkoi-prod2-engine-internal-alb" }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "engine_internal_home_box" {
-  count                        = var.create_engine_internal_alb ? length(module.box_usw2) : 0
-  security_group_id            = aws_security_group.engine_internal[0].id
-  description                  = "usw2 media box"
-  ip_protocol                  = "tcp"
-  from_port                    = 3000
-  to_port                      = 3000
-  referenced_security_group_id = module.box_usw2[0].security_group_id
-}
-
 resource "aws_vpc_security_group_ingress_rule" "engine_internal_spokes" {
-  for_each          = var.create_engine_internal_alb ? { for k, v in local.enabled : k => local.net.regions[k].cidr if k != local.home_key } : {}
+  for_each          = var.create_engine_internal_alb ? local.net.edge_cidrs : {}
   security_group_id = aws_security_group.engine_internal[0].id
-  description       = "${each.key} media VPC (peered)"
+  description       = "${each.key} media/game VPC (peered)"
   ip_protocol       = "tcp"
   from_port         = 3000
   to_port           = 3000
@@ -123,4 +114,14 @@ resource "aws_lb_listener_rule" "engine_internal" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.engine_internal[0].arn
   }
+}
+
+output "engine_internal" {
+  description = "The engine api's private door for the media boxes: compute registers engine-api's api:3000 in target_group_arn; the media stack uses url (PORTAL_INTERNAL_URL) and adds its usw2 box to security_group_id."
+  value = var.create_engine_internal_alb ? {
+    target_group_arn  = aws_lb_target_group.engine_internal[0].arn
+    dns_name          = aws_lb.engine_internal[0].dns_name
+    url               = "http://${aws_lb.engine_internal[0].dns_name}:3000"
+    security_group_id = aws_security_group.engine_internal[0].id
+  } : null
 }

@@ -234,6 +234,13 @@ module "engine_api" {
     container_name   = var.engine_edge_sidecar ? "edge" : "api"
     container_port   = var.engine_edge_sidecar ? var.engine_edge_port : 3000
   }
+  # P5: the media boxes' private door to /internal/** — edge-alb's internal ALB → the api container itself (never the
+  # edge, which 404s /internal/). Absent until edge-alb is applied with it (try): compute still plans without it.
+  extra_load_balancers = local.engine_internal_tg == null ? [] : [{
+    target_group_arn = local.engine_internal_tg
+    container_name   = "api"
+    container_port   = 3000
+  }]
   health_check_grace_period_seconds = 60
 
   min_capacity          = var.parked ? 0 : (local.tg["engine-api"].min_capacity)

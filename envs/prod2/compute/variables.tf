@@ -356,3 +356,9 @@ variable "cms_source_cidrs" {
     error_message = "cms_source_cidrs: 1–2 IPv4 CIDRs, prefix /8–/32 (the api refuses a wider TRUSTED_PROXIES entry)."
   }
 }
+
+variable "engine_internal_lb" {
+  description = "Register engine-api's api:3000 in edge-alb's INTERNAL target group (the media boxes' /internal/** path, P5). Off = the public target group only."
+  type        = bool
+  default     = true
+}

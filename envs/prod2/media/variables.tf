@@ -67,7 +67,7 @@ variable "media_regions" {
       origin_verify_secret  = "gkoi/media/usw2/origin-verify"
     }
     euc1 = {
-      enabled               = false
+      enabled               = true
       label                 = "Frankfurt"
       rehearsal_stream_host = "stream-euc1-p2.gkoi.com"
       rehearsal_origin_host = "origin-live-euc1-p2.gkoi.com"
@@ -76,7 +76,7 @@ variable "media_regions" {
       origin_verify_secret  = "gkoi/media/euc1/origin-verify"
     }
     use1 = {
-      enabled               = false
+      enabled               = true
       label                 = "Virginia"
       rehearsal_stream_host = "stream-use1-p2.gkoi.com"
       rehearsal_origin_host = "origin-live-use1-p2.gkoi.com"
@@ -132,14 +132,26 @@ variable "images" {
   }
 }
 
-variable "media_origin_image" {
+variable "media_origin_ecr_repo" {
   description = <<-EOT
-    The media origin: stock nginx with the engine's rendered config (it has no image of its own — buildspecs/mikaido.yml).
-    Default = the exact image the live Oregon media box runs (nginx:1.27-alpine, its RepoDigest 2026-11-11), from Docker Hub.
-    An ECR mirror (gkoi/media-origin exists in us-west-2 only, empty) would remove the Docker Hub dependency.
+    The media origin is stock nginx with the engine's rendered config (no image of its own — buildspecs/mikaido.yml).
+    It runs from OUR ECR mirror (registry extra_repositories, replicated to every media region), resolved per region by
+    tag → digest at plan time: the boxes never depend on Docker Hub. The mirror is the live box's exact image
+    (nginx:1.27-alpine, amd64, Docker Hub index digest sha256:65645c7b…) — README "The nginx mirror" has the push.
   EOT
   type        = string
-  default     = "nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10"
+  default     = "gkoi/ci-nginx"
+}
+
+variable "media_origin_image_tag" {
+  type    = string
+  default = "1.27-alpine"
+}
+
+variable "media_origin_image_override" {
+  description = "A full image reference used instead of the mirror (e.g. the Docker Hub nginx:1.27-alpine@sha256:65645c7b… in an emergency). Empty = the mirror."
+  type        = string
+  default     = ""
 }
 
 # =================================================================================================================
@@ -152,7 +164,7 @@ variable "engine_home_region" {
 }
 
 variable "engine_internal_url_override" {
-  description = "PORTAL_INTERNAL_URL for every box instead of the internal ALB (empty = http://<internal ALB>:3000)."
+  description = "PORTAL_INTERNAL_URL for every box instead of edge-alb's internal ALB (empty = its engine_internal.url)."
   type        = string
   default     = ""
 }
@@ -252,10 +264,4 @@ variable "udp_buffer_bytes" {
 variable "origin_max_conns_per_viewer" {
   type    = number
   default = 100
-}
-
-variable "create_engine_internal_alb" {
-  description = "The internal ALB the boxes reach the engine api's /internal/* through (README 'How a box reaches the engine')."
-  type        = bool
-  default     = true
 }

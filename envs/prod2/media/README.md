@@ -6,7 +6,7 @@ regional live origin, and **registering its pools with the engine** (SPEC-ENGINE
 `MEDIA_BOX_INSTANCES`, no `RELAY_POOL_INSTANCES` entry). Per the 2026-11-11 gap audit (B3-2/B3-3) the media plane moves
 **with** the engine: these boxes are brought up and proven privately first, then ONE window flips engine + FM + media.
 
-State: `prod2/media/terraform.tfstate`. Defaults: only `usw2` is enabled.
+State: `prod2/media/terraform.tfstate`. Defaults: all three regions enabled (operator ruling: three regions, one box each).
 
 ## What an apply creates
 
@@ -25,9 +25,13 @@ Per enabled region (`modules/media-box`, in that region):
 | Alarms → the region's `gkoi-ops-alerts` | in-service < min (10 min), CPU > 75 % (15 min), status check (5 min), disk > 80 % |
 
 Once, in us-west-2: the box bundle in `s3://gkoi-build-sources-…/gkoi-infra/media-box/` (stable keys; the config
-carries each file's sha256); the **internal
-ALB** `gkoi-prod2-engine-internal` (+ target group `gkoi-prod2-engine-api-int`, SG, the ECS-tasks SG rule for 3000);
-the Valkey SG rule for the usw2 box.
+carries each file's sha256); the Valkey SG rule and the internal-ALB SG rule for the usw2 box (both SG references).
+
+Elsewhere (this P5 work, other stacks): **edge-alb** owns the internal ALB `gkoi-prod2-engine-internal` (+ target
+group `gkoi-prod2-engine-api-int`, its SG admitting every peered edge VPC on 3000, the ECS-tasks SG rule) and outputs
+`engine_internal`; **compute** registers engine-api's `api:3000` in it (`extra_load_balancers`) and runs the engine with
+`RELAY_REGISTRY_ONLY=1` and no `RELAY_POOL_INSTANCES`; **data** admits network's `edge_cidrs` to Valkey by default;
+**registry** has `gkoi/ci-nginx` (the media origin's image mirror).
 
 ## Design choices
 
@@ -40,7 +44,8 @@ the Valkey SG rule for the usw2 box.
   publish, ingest heartbeats, session state/health, vod events). The public path cannot carry it: the engine edge
   (ECS sidecar, same `edge.conf.template`) answers `/internal/` with 404. Service Connect serves ECS clients only;
   Cloud Map DNS would need its private zone associated with every peered VPC and has no health gate. Chosen: an
-  **internal ALB** in the home private subnets, listener :3000 forwarding only `/internal/*` + `/api/v1/healthz` to the
+  **internal ALB** (in the edge-alb stack, which owns every load balancer and target group, so no stack reads a
+  later one) in the home private subnets, listener :3000 forwarding only `/internal/*` + `/api/v1/healthz` to the
   api container's own port 3000 (404 otherwise). Its DNS name is public DNS → private IPs, so every peered VPC uses it
   with no DNS work; peering traffic between regions is encrypted by AWS; the api authenticates these routes with the
   relay secret only (no source-address rule). `HTTP_KEEPALIVE_MS=55000` < the ALB's 60 s idle timeout (G4/G6).
@@ -49,8 +54,10 @@ the Valkey SG rule for the usw2 box.
   `REDIS_TLS_CA_FILE`). `REDIS_REQUIRE_NOEVICTION` stays unset (CONFIG is refused on ElastiCache; the parameter group
   enforces noeviction — as compute).
 - **Images by digest from the box's own region's ECR** (registry replication, checked 2026-11-11: both digests of
-  `gkoi-2026.11.11-1` are in euc1 + use1). `media-origin` is stock nginx with the engine's rendered config: default =
-  the live box's exact image `nginx:1.27-alpine@sha256:65645c7b…` from Docker Hub (see open questions).
+  `gkoi-2026.11.11-1` are in euc1 + use1). `media-origin` is stock nginx with the engine's rendered config: the live
+  box's exact image (`nginx:1.27-alpine`, Docker Hub index `sha256:65645c7b…`, amd64) mirrored once into
+  `gkoi/ci-nginx:1.27-alpine` (replicated); each region resolves the tag to its digest at plan time (a missing push or
+  replica stops the plan). No Docker Hub at boot. `media_origin_image_override` is the emergency escape.
 - **The engine's config files** (`pool.yml`, `pool-entrypoint.sh`, `media-live-origin-entrypoint.sh`,
   `media-live-origin.conf.template` — bind-mounted by compose on the live box) come from the SAME release's
   `source.zip` that CodeBuild built the images from, checked against `releases/mikaido.json`'s `source_sha256`. No
@@ -71,33 +78,58 @@ the Valkey SG rule for the usw2 box.
 
 ## Apply order (cross-stack)
 
-1. `network`, `data`, `registry`, `observability` (exist). `compute` exists (parked).
-2. **The secrets this stack reads** (all eight exist WITH a value — DescribeSecret, 2026-11-11; values not read):
-   `gkoi/prod2/engine/{REDIS_URL,RELAY_SHARED_SECRET,MK_POOL_API_PASS,MK_POOL_READ_SECRET,PREVIEW_TOKEN_KEY}` and
-   `gkoi/media/<key>/origin-verify` (made in P0, "rotated at P5": its value must be 32–128 of `[A-Za-z0-9_-]` — the
-   origin entrypoint refuses anything else; plain string, or set `origin_verify_secret_json_key`).
-3. **`media`** (this stack). Creates the box(es); the internal ALB's target group is empty until step 4.
-4. **`compute` — a change this stack cannot make** (`modules/ecs-service` takes ONE load balancer): register the
-   engine-api service's `api` container port 3000 in this stack's output `engine_internal_target_group_arn` as a second
-   load balancer. Until then every agent call answers 503 and no publish is admitted.
-5. **`data`** — for each spoke region enabled here: `valkey_peer_cidrs = <this stack's output valkey_peer_cidrs>`
-   (cross-region peering cannot reference an SG; the usw2 box gets an SG-referenced rule from this stack).
-6. **For the rehearsal and the window, compute's engine env:** `RELAY_REGISTRY_ONLY=1` and `RELAY_POOL_INSTANCES=""`
-   on the api (the worker defaults to an empty list). **Never leave the Lightsail static list in it**: a static entry
-   never leaves the registry, so placement would keep choosing the unroutable Lightsail pools (172.26.x / 10.88.x).
+Every step through the runner, from a clean checkout of the branch/tag (`tools/gkoi-infra-run <stack> plan`, read the
+summary, then `apply`). `network`, `observability` are unchanged.
 
-Each through the runner as usual (`TF_STACK=media TF_ACTION=plan`, read the summary, then `apply`). The runner role
-also needs `s3:PutObject` on `gkoi-build-sources-…/gkoi-infra/media-box/*` (the bundle) — see open questions.
+| # | Command | What it creates / changes |
+|---|---|---|
+| 0 | **by hand:** the nginx mirror push (below) — after step 1 | `gkoi/ci-nginx:1.27-alpine` in us-west-2, replicated to euc1 + use1 |
+| 1 | `tools/gkoi-infra-run registry apply` | + ECR repo `gkoi/ci-nginx` (immutable, scan, keep 20; replication covers `gkoi/*`) |
+| 2 | `tools/gkoi-infra-run edge-alb apply` | + the internal ALB, its target group, listener :3000 (404 default) + the `/internal/*` + health rule, its SG (ingress 3000 from every `edge_cidrs` VPC, egress to the tasks SG), the tasks-SG ingress 3000 from it; output `engine_internal` |
+| 3 | `tools/gkoi-infra-run data apply` | + Valkey ingress 6379 from 10.20.0.0/16 (euc1) and 10.30.0.0/16 (use1) |
+| 4 | `tools/gkoi-infra-run compute apply` (maybe `--allow-destroy`, see below) | engine-api gets a second load balancer (`api:3000` → the internal TG); engine env: `RELAY_REGISTRY_ONLY=1` added, `RELAY_POOL_INSTANCES` removed (new task definitions for api / worker / migrate; services stay parked at 0) |
+| 5 | `tools/gkoi-infra-run media apply` | the three boxes (per region: ASG + launch template, EIP, 2 SGs, role + profile, SSM config, 2 rehearsal A records, 4 alarms), the bundle objects, the usw2 Valkey + internal-ALB rules |
+
+Order matters: media reads edge-alb's `engine_internal` (its plan STOPS without it) and the ci-nginx digests (STOPS if
+not pushed/replicated); compute reads `engine_internal` with `try()` (it still plans if edge-alb has not been applied
+yet — it then registers nothing extra). **Step 4 and `load_balancer`:** whether the AWS provider (5.100) updates an
+ECS service's load balancers in place or REPLACES the service was not verified offline — read the plan: a replace of
+`module.engine_api…aws_ecs_service.this` needs `--allow-destroy` (harmless while parked at 0 tasks; the service name
+is kept).
+
+The secrets this stack reads (all eight exist WITH a value — DescribeSecret, 2026-11-11; values not read):
+`gkoi/prod2/engine/{REDIS_URL,RELAY_SHARED_SECRET,MK_POOL_API_PASS,MK_POOL_READ_SECRET,PREVIEW_TOKEN_KEY}` and
+`gkoi/media/<key>/origin-verify` (32–128 of `[A-Za-z0-9_-]` — the origin entrypoint refuses anything else; plain
+string, or set `origin_verify_secret_json_key`). Nothing to fill.
+
+The runner role also needs `s3:PutObject` on `gkoi-build-sources-…/gkoi-infra/media-box/*` (the bundle) — see open
+questions.
+
+### The nginx mirror (by hand, once — the orchestrator's role may push `gkoi/ci-*`)
+
+```
+R=127214190346.dkr.ecr.us-west-2.amazonaws.com
+gkoi-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $R
+docker pull --platform linux/amd64 nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10   # = nginx:1.27-alpine, the live media box's
+docker tag nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 $R/gkoi/ci-nginx:1.27-alpine
+docker push $R/gkoi/ci-nginx:1.27-alpine
+# replication takes a minute or two; check both replicas before the media plan:
+for r in eu-central-1 us-east-1; do gkoi-aws ecr describe-images --region $r --repository-name gkoi/ci-nginx --image-ids imageTag=1.27-alpine --query 'imageDetails[0].imageDigest' --output text; done
+```
+
+(The pushed digest is the amd64 manifest's, not Docker Hub's index digest — the stack resolves the tag, so either is
+fine; all three regions must print the same digest.)
 
 ## Bring one region up privately and prove it against the ECS engine
 
-1. `media_regions.<key>.enabled = true` (usw2 first), apply. The ASG launches; the box bootstraps itself (~5–8 min:
+1. Apply (all three regions are enabled by default; to go one at a time, set `enabled = false` on euc1 / use1 in a
+   tfvars first). The ASG launches; the box bootstraps itself (~5–8 min:
    packages, certs, pulls). Follow it in CloudWatch `/gkoi/prod2/media/<key>/bootstrap`, or over SSM:
    `aws ssm start-session --target <instance>` → `sudo /opt/gkoi-media/media-bootstrap.sh check` (exit 0 = EIP on the
    box, 4 certs, env files, every container healthy, lifecycle watcher up; it prints the agent's `/drain` report).
 2. **Registration:** the agent log shows its box id + pools; `redis-cli` (from an ECS Exec shell in engine-api) →
    `SMEMBERS relay:registry:pools`, `GET relay:registry:pool:<box>-p0` (TTL 30 s, re-written every 10 s). With the
-   engine unparked (rehearsal: api + worker, `RELAY_REGISTRY_ONLY=1`, step 4 done):
+   engine unparked (rehearsal: api + worker — `RELAY_REGISTRY_ONLY=1` is compute's default now):
    `GET https://engine.gkoi.com/api/v1/app/regions` through the ALB (`curl --connect-to engine.gkoi.com:443:<alb dns>:443`)
    lists the region with its label and probe host `stream-<key>-p2.gkoi.com`; the engine logs no "dropped registration".
 3. **Go-live test:** a test user's relay session on the rehearsal DB (a copy of prod) placed in this region → the
@@ -115,14 +147,14 @@ also needs `s3:PutObject` on `gkoi-build-sources-…/gkoi-infra/media-box/*` (th
 6. **Drain / lifecycle:** over SSM `docker exec <agent> node -e …/drain` POST → the engine stops placing there; DELETE
    clears it. Optionally set the ASG desired to 0 once: the watcher drains, completes the hook; the registry entry
    expires within 30 s.
-7. Re-park the engine services. Repeat for euc1 (enable, apply, `data` valkey_peer_cidrs) and use1.
+7. Re-park the engine services. Repeat the proof for euc1 and use1.
 
 ## The window (engine + FM + media, nobody live)
 
 Before: lower nothing (the four live records are TTL 300 already — wait ≥ 5 min after each flip); have the Lightsail IPs
 for the rollback (stream.gkoi.com + origin-live-usw2 → `34.212.239.200`, stream-euc1 + origin-live-euc1 → `63.179.228.39`).
 
-1. P3's own steps (dump/restore, compute unparked with `RELAY_REGISTRY_ONLY=1` + an empty `RELAY_POOL_INSTANCES`,
+1. P3's own steps (dump/restore, compute unparked — the engine already runs registry-only, no static list —
    `engine` / `files` / `origin-live` → the ALB). The Lightsail media agents lose Redis at that moment — expected.
 2. Per media region: `serve_live_names = true`, `manage_live_records = true`; apply `media`. The config now names the
    live hosts; the A records `stream[-euc1].gkoi.com` + `origin-live-<key>.gkoi.com` move to the EIP.
@@ -191,7 +223,7 @@ no AWS call — three regions, the default, a bad pool count, the live-records s
 | CloudWatch: ~20 agent metrics (ASG + instance aggregations) + 4 alarms + log ingestion | ~$7 + logs | ~$7 + logs | ~$7 + logs |
 | **Region** | **~$166** | **~$188** | **~$166** |
 
-Once: the internal ALB ~$16.4 + LCUs (~$5) ≈ **$22**. All three ≈ **$540/month** (+ egress: platform relays
+Once (in edge-alb): the internal ALB ~$16.4 + LCUs (~$5) ≈ **$22**. All three ≈ **$540/month** (+ egress: platform relays
 $0.09/GB ≈ $0.24 per platform per stream-hour at 6 Mb/s; a spoke's recording upload to the us-west-2 bucket and its
 Valkey/API traffic cross peering at $0.02/GB — ≈ $0.05 per recorded stream-hour; EC2 → CloudFront is free). The plan
 budgeted ~$650 for four regions incl. Tokyo. The live Lightsail boxes are 8 vCPU / 32 GB (`2xlarge_3_0`): the 4/16 box
@@ -199,10 +231,12 @@ is the plan's size, unproven by a capacity test (plan §5.5) — watch the CPU a
 
 ## Assumptions and open questions
 
-1. **Compute must register the api in the internal target group** (step 4) — `modules/ecs-service` takes one load
-   balancer; make it a list. Without it the boxes run but admit no publish.
-2. **The window's engine env** — `RELAY_REGISTRY_ONLY=1` + an empty `RELAY_POOL_INSTANCES` in compute (step 6). Today
-   compute's `env-defaults.tf` carries the Lightsail list.
+1. **Done in this branch** (were open): compute registers engine-api in the internal TG; the engine env is
+   registry-only with no static list; data admits the spoke VPCs to Valkey; nginx comes from our ECR. Left: whether
+   step 4 replaces the engine-api service (read the plan).
+2. **The rollback to Lightsail** needs the Lightsail list back in compute (`engine_env = { RELAY_POOL_INSTANCES = … }`
+   + `RELAY_REGISTRY_ONLY` off) only if the ECS engine should drive the Lightsail boxes — it cannot (no route); the
+   real rollback is P3's DNS flip back to the Lightsail engine.
 3. **No engine code change found necessary.** Checked in the code at the release commit f997524: the agent boots with
    `MEDIA_BOX_INSTANCES` and no static list (`config.ts`), validates its own registration (`registeredInstanceProblem`),
    uses the default AWS credential chain when `S3_ACCESS_KEY/SECRET` are unset (D3), supports `rediss://` + keep-alive
@@ -215,8 +249,8 @@ is the plan's size, unproven by a capacity test (plan §5.5) — watch the CPU a
    distance stays for euc1 (and ~65 ms for use1) until G5. **G3** (noeviction) is the data stack's parameter group.
 5. **Frankfurt's live bucket:** every box writes `gkoi-beta-vods` (us-west-2), as the Lightsail boxes do (only
    Oregon's env was read — the Frankfurt box's `S3_BUCKET` was not checked; per-region buckets (C6) are not created).
-6. **Docker Hub for media-origin:** nginx is pulled anonymously from Docker Hub (rate limits; an outage blocks a new
-   box). Mirror it into `gkoi/media-origin` (exists in us-west-2 only — create it replicated) and set `media_origin_image`.
+6. **Valkey from the spokes** admits whole VPC CIDRs (10.20/16, 10.30/16): the game boxes there could connect too;
+   the TLS auth token still gates every connection. Narrow to the media SG's subnets if wanted.
 7. **The runner role** needs `s3:PutObject` on the bundle prefix in `gkoi-build-sources-…`, and the bucket's policy (if
    any) must let the box roles GET `gkoi-infra/media-box/*` + `mikaido/*/source.zip` — neither policy was read.
 8. **origin-verify secrets** — values not read (by design). The P5 rotation means CloudFront's headers change in the
