@@ -31,6 +31,8 @@
 #
 # Nothing here prints a secret. Logs: /var/log/gkoi-media-bootstrap.log (user-data) → CloudWatch …/bootstrap.
 set -euo pipefail
+# SSM Run Command starts with no HOME and the agent's snap directory as cwd; the aws CLI and docker want both sane.
+export HOME="${HOME:-/root}"; cd /
 GKOI_MEDIA_WHO=media-bootstrap
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=media-lib.sh
@@ -114,8 +116,12 @@ phase_config() {
   key="$(cfg .key)" || die "no key in $CFG (the user-data writes the first copy)"
   param="/gkoi/prod2/media/$key/config"
   tmp="$(mktemp)"
-  aws ssm get-parameter --region "$region" --name "$param" --query Parameter.Value --output text > "$tmp" \
+  # Captured, not redirected: under SSM Run Command (no HOME, the agent's snap cwd) the snap aws CLI wrote NOTHING to
+  # a redirected temp file and still exited 0 (2026-11-11); a pipe / capture is reliable.
+  local val
+  val="$(aws ssm get-parameter --region "$region" --name "$param" --query Parameter.Value --output text)" \
     || { rm -f "$tmp"; die "cannot read $param"; }
+  printf '%s\n' "$val" > "$tmp"
   jq -e '.v == 1 and (.key | type == "string")' "$tmp" >/dev/null || { rm -f "$tmp"; die "$param is not a v1 media box config"; }
   install_if_changed "$tmp" "$CFG" 0644 || say "config: $param unchanged"
   rm -f "$tmp"

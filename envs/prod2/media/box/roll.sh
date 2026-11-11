@@ -21,6 +21,8 @@
 #   5. the drain cleared, `check` printed.
 # --dry-run: steps 1–2 only, then print what would change.
 set -euo pipefail
+# SSM Run Command starts with no HOME and the agent's snap directory as cwd; the aws CLI and docker want both sane.
+export HOME="${HOME:-/root}"; cd /
 GKOI_MEDIA_WHO=roll
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=media-lib.sh
