@@ -342,7 +342,7 @@ variable "parked_services" {
     false = []).
   EOT
   type        = set(string)
-  default     = ["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web"]
+  default     = ["cms", "fm-api", "fm-worker", "fm-web"]
   validation {
     condition     = alltrue([for s in var.parked_services : contains(["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web"], s)])
     error_message = "parked_services names services: cms, engine-api, engine-worker, fm-api, fm-worker, fm-web."
@@ -359,7 +359,7 @@ variable "rehearsal" {
     NEVER true in the window: recordings would land in a bucket that expires them after 3 days.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "cms_source_cidrs" {

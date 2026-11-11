@@ -209,7 +209,7 @@ variable "rehearsal" {
     roll.sh (the role's rights change at once; the agent's env at the roll). Flip it together with compute's `rehearsal`.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "recordings_bucket_region" {
