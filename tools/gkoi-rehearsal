@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# gkoi-rehearsal: run the PRIVATE go-live rehearsal — the one-off ECS task gkoi-prod2-rehearsal-driver (stack
+# envs/prod2/rehearsal) — follow its log, print the per-region PASS/FAIL table, exit with the driver's code.
+#
+#   gkoi-rehearsal [--only usw2,euc1] [--seconds N] [--parallel] [--config FILE] [--force] [--no-wait] [--dry-run]
+#
+#   --only K[,K]     only these region keys (default: every box the media stack runs)
+#   --seconds N      publish N seconds per region (20–600; default the task definition's, 60)
+#   --parallel       all regions at once (default: one after another — clearer timings)
+#   --config FILE    the run config as JSON (the stack's `run_config` output) instead of SSM
+#                    /gkoi/prod2/rehearsal/run-config — for a credential that cannot read SSM
+#   --force          start even when the run config says the rehearsal is not armed (compute + media rehearsal = true,
+#                    both on the scratch bucket, engine-api + engine-worker running)
+#   --no-wait        start and print the task ARN only
+#   --dry-run        print the RunTask request (for `aws ecs run-task --cli-input-json file://…`); start nothing
+#
+# The run config is written when the rehearsal stack is applied: apply it AFTER compute + media flipped the switch
+# (its `armed` field is a snapshot of their state then). The driver's log carries no secret; it is printed as is.
+# Exit: the driver's (0 = every region PASS, 1 = a region failed, 2 = driver configuration, 3 = the engine or the
+# regions never came up, 10 = the task's setup failed), 1 on a tool error, 4 = not armed (without --force).
+set -euo pipefail
+GKOI_TOOL=gkoi-rehearsal
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+ONLY="" SECONDS_OPT="" PARALLEL=0 CONFIG="" FORCE=0 WAIT=1 DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --only) ONLY="${2:-}"; shift 2 ;;
+    --seconds) SECONDS_OPT="${2:-}"; shift 2 ;;
+    --parallel) PARALLEL=1; shift ;;
+    --config) CONFIG="$(readlink -f "${2:-}")"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --no-wait) WAIT=0; shift ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+[ -z "$ONLY" ] || [[ "$ONLY" =~ ^[a-z0-9]+(,[a-z0-9]+)*$ ]] || die "--only takes region keys: usw2,euc1,use1"
+if [ -n "$SECONDS_OPT" ]; then
+  [[ "$SECONDS_OPT" =~ ^[0-9]+$ ]] && [ "$SECONDS_OPT" -ge 20 ] && [ "$SECONDS_OPT" -le 600 ] || die "--seconds takes 20–600"
+fi
+
+GKOI_WORK="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-rehearsal.XXXXXX")"
+trap 'rm -rf "$GKOI_WORK"' EXIT
+
+if [ -n "$CONFIG" ]; then
+  [ -r "$CONFIG" ] || die "cannot read $CONFIG"
+  cfg="$(jq -c . "$CONFIG")" || die "$CONFIG is not JSON"
+else
+  cfg="$(awsc ssm get-parameter --name /gkoi/prod2/rehearsal/run-config --query Parameter.Value --output text)" \
+    || die "cannot read SSM /gkoi/prod2/rehearsal/run-config (apply the rehearsal stack; or --config FILE with its run_config output)"
+fi
+for f in cluster family container log_group; do
+  [ -n "$(jq -r --arg f "$f" '.[$f] // empty' <<<"$cfg")" ] || die "the run config has no $f"
+done
+CLUSTER="$(jq -r .cluster <<<"$cfg")" GROUP="$(jq -r .log_group <<<"$cfg")" CONTAINER="$(jq -r .container <<<"$cfg")"
+if [ -n "$ONLY" ]; then
+  for k in ${ONLY//,/ }; do
+    jq -e --arg k "$k" '.regions | index($k)' <<<"$cfg" >/dev/null || die "--only: $k is not a rehearsal region ($(jq -r '.regions | join(",")' <<<"$cfg"))"
+  done
+fi
+
+# Armed = what the rehearsal stack saw in compute + media at its apply.
+armed="$(jq -r '.armed | (.compute and .media and .scratch_matches and ((.running // []) | index("engine-api") != null) and ((.running // []) | index("engine-worker") != null))' <<<"$cfg")"
+say "rehearsal: $(jq -r '"\(.family):\(.revision) on \(.cluster), regions \(.regions | join(",")), scratch s3://\(.scratch_bucket)"' <<<"$cfg")"
+say "armed (at the rehearsal stack's apply): $(jq -c .armed <<<"$cfg")"
+if [ "$armed" != true ]; then
+  if [ "$FORCE" = 1 ]; then say "NOT ARMED — starting anyway (--force)"
+  elif [ "$DRY" = 1 ]; then say "NOT ARMED — a real run would refuse (exit 4) without --force"
+  else say "ERROR: NOT ARMED — compute + media rehearsal = true on the scratch bucket, engine-api + engine-worker unparked, then re-apply the rehearsal stack (README). --force to override." >&2; exit 4
+  fi
+fi
+
+jq -n --argjson c "$cfg" --arg only "$ONLY" --arg secs "$SECONDS_OPT" --arg par "$PARALLEL" '
+  def e($n; $v): {name: $n, value: $v};
+  ([ (if $only != "" then e("ONLY"; $only) else empty end),
+     (if $secs != "" then e("PUBLISH_SECONDS"; $secs) else empty end),
+     (if $par == "1" then e("PARALLEL"; "1") else empty end) ]) as $envs
+  | { cluster: $c.cluster, taskDefinition: "\($c.family):\($c.revision)", launchType: "FARGATE", platformVersion: "LATEST",
+      count: 1, startedBy: "gkoi-rehearsal",
+      networkConfiguration: { awsvpcConfiguration: { subnets: $c.subnets, securityGroups: $c.securityGroups, assignPublicIp: "DISABLED" } } }
+  + (if ($envs | length) > 0 then { overrides: { containerOverrides: [ { name: $c.container, environment: $envs } ] } } else {} end)' \
+  > "$GKOI_WORK/run-task.json"
+
+if [ "$DRY" = 1 ]; then
+  say "DRY RUN — the RunTask request (aws ecs run-task --region $GKOI_REGION --cli-input-json file://run-task.json):"
+  jq . "$GKOI_WORK/run-task.json"
+  say "then: aws logs tail $GROUP --region $GKOI_REGION --follow --log-stream-name-prefix driver/$CONTAINER/<task id>"
+  exit 0
+fi
+
+out="$(awsc ecs run-task --cli-input-json file://run-task.json --output json)" || die "run-task failed"
+ARN="$(jq -r '.tasks[0].taskArn // empty' <<<"$out")"
+[ -n "$ARN" ] || die "run-task started nothing: $(jq -c .failures <<<"$out")"
+TASK_ID="${ARN##*/}"
+STREAM="driver/$CONTAINER/$TASK_ID"
+say "started $ARN (log $GROUP $STREAM)"
+[ "$WAIT" = 1 ] || exit 0
+
+# Follow: print new log events every poll until the task stops, then drain the stream.
+token="" last=""
+pull_log() {
+  local args=(logs get-log-events --log-group-name "$GROUP" --log-stream-name "$STREAM" --start-from-head --output json)
+  [ -z "$token" ] || args+=(--next-token "$token")
+  local page next
+  while page="$(awsc "${args[@]}" 2>/dev/null)"; do
+    jq -r '.events[].message' <<<"$page"
+    next="$(jq -r '.nextForwardToken // empty' <<<"$page")"
+    [ -n "$next" ] && [ "$next" != "$token" ] || break
+    token="$next"
+    args=(logs get-log-events --log-group-name "$GROUP" --log-stream-name "$STREAM" --start-from-head --output json --next-token "$token")
+    [ "$(jq '.events | length' <<<"$page")" -gt 0 ] || break
+  done
+}
+while :; do
+  d="$(awsc ecs describe-tasks --cluster "$CLUSTER" --tasks "$ARN" --output json)" || { say "(poll failed, retrying)"; sleep "$GKOI_POLL_SECONDS"; continue; }
+  st="$(jq -r '.tasks[0].lastStatus' <<<"$d")"
+  [ "$st" = "$last" ] || { say "task $st ($(date -u +%H:%M:%S)Z)"; last="$st"; }
+  case "$st" in RUNNING|DEACTIVATING|STOPPING|DEPROVISIONING|STOPPED) pull_log ;; esac
+  [ "$st" = STOPPED ] && break
+  sleep "$GKOI_POLL_SECONDS"
+done
+pull_log
+
+say "stopped: $(jq -r '.tasks[0].stoppedReason // "-"' <<<"$d")"
+rc="$(jq -r --arg c "$CONTAINER" '.tasks[0].containers[] | select(.name == $c) | .exitCode // empty' <<<"$d")"
+say "driver exit ${rc:-none}"
+if [ "$rc" = 0 ]; then say "REHEARSAL PASSED"; exit 0; fi
+say "ERROR: the rehearsal did not pass (driver exit ${rc:-none} — the table above names the failing regions)" >&2
+[[ "$rc" =~ ^[0-9]+$ ]] && [ "$rc" != 0 ] && exit "$rc"
+exit 1

@@ -7,6 +7,7 @@
 | `gkoi-infra-run <stack> plan\|apply …` | zip this repo → S3 → the `gkoi-infra-runner` CodeBuild project → stream its log |
 | `gkoi-db-dump <cms\|engine\|fm> [--check] [--no-upload]` | read-only `pg_dump -Fc --no-owner --no-acl` inside the prod box's postgres container → here (0600, sha256) → `s3://gkoi-prod2-db-transit-127214190346/<app>/<stamp>/<db>.dump` |
 | `gkoi-db-restore <app> <key> [--sha256 H] [--drop-first]` | the one-off ECS task `gkoi-prod2-db-restore-<app>` (stack `db-restore`): fetch + sha check → role + database + `pg_restore --role` into RDS → ownership proof; waits, prints the log |
+| `gkoi-rehearsal [--only K,K] [--seconds N] [--parallel] [--config F] [--dry-run]` | the private go-live rehearsal: the one-off ECS task `gkoi-prod2-rehearsal-driver` (stack `rehearsal`) — every media region: session, 60 s RTMPS publish, live + LL-HLS via the origin and the engine, recording + thumbnails + MP4 in the scratch bucket; follows the log, exits with the driver's PASS/FAIL code |
 | `gkoi-lint-buildspecs` | check `buildspecs/*.yml` (YAML, the shared block identical, bash -n, shellcheck) |
 | `lib/gkoi-tools.sh` | shared by the above |
 
