@@ -618,6 +618,29 @@ resource "aws_lb_listener_rule" "files_private" {
   }
 }
 
+# Build boxes with a scoped build key (fm-publish): the admin API only, from var.fm_publisher_cidrs. The uploads themselves
+# go to the bucket by presigned URL, not through here.
+resource "aws_lb_listener_rule" "files_publishers" {
+  count        = length(var.fm_publisher_cidrs) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 319
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.svc["fm-api"].arn
+  }
+
+  condition {
+    host_header { values = local.fm_fqdns }
+  }
+  condition {
+    source_ip { values = var.fm_publisher_cidrs }
+  }
+  condition {
+    path_pattern { values = ["/api/v1/admin/*"] }
+  }
+}
+
 resource "aws_lb_listener_rule" "files_other" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 321

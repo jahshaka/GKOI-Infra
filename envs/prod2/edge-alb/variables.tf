@@ -162,3 +162,20 @@ variable "create_engine_internal_alb" {
   type        = bool
   default     = true
 }
+
+variable "fm_publisher_cidrs" {
+  description = <<-EOT
+    Build boxes that publish to the file manager with a scoped BUILD KEY (fm-publish; GKOI Live's cook boxes). They may
+    reach files.gkoi.com /api/v1/admin/* (every route there still needs its own credential: a build key, the gateway
+    identity or an admin session). Empty = no rule. At most 3 IPv4 CIDRs, /24 or narrower.
+  EOT
+  type        = list(string)
+  default     = ["88.20.102.164/32"]
+  validation {
+    condition = (
+      length(var.fm_publisher_cidrs) <= 3 &&
+      alltrue([for c in var.fm_publisher_cidrs : can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/(2[4-9]|3[0-2])$", c)) && can(cidrhost(c, 0))])
+    )
+    error_message = "fm_publisher_cidrs: at most 3 IPv4 CIDRs, prefix /24 to /32."
+  }
+}
