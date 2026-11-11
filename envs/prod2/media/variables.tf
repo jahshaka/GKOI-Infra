@@ -199,6 +199,19 @@ variable "recordings_bucket" {
   default     = "gkoi-beta-vods"
 }
 
+variable "rehearsal" {
+  description = <<-EOT
+    The private go-live rehearsal (envs/prod2/rehearsal/README.md). true = every box's agent records into the data
+    stack's SCRATCH bucket (output rehearsal_vods_bucket) instead of recordings_bucket, VOD_BUCKETS is dropped, the box
+    roles reach ONLY the scratch bucket (the live gkoi-beta-vods is not writable), and the home NAT's addresses
+    (network output home_nat_public_ips) are added to every origin's 443 (the driver runs in ECS and leaves by the NAT).
+    The plan refuses it while any region serves or manages a live name. A running box picks the change up with
+    roll.sh (the role's rights change at once; the agent's env at the roll). Flip it together with compute's `rehearsal`.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "recordings_bucket_region" {
   type    = string
   default = "us-west-2"

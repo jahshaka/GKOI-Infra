@@ -90,7 +90,10 @@ resource "aws_iam_role_policy" "exec" {
 locals {
   task_roles = toset(["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web", "migrate"])
 
-  vod_buckets = distinct(concat([var.engine_vod_bucket], var.engine_extra_vod_buckets))
+  # Rehearsal: the scratch bucket ONLY — the live recordings bucket is neither configured nor writable then.
+  vod_buckets = var.rehearsal ? [local.engine_bucket] : distinct(concat([var.engine_vod_bucket], var.engine_extra_vod_buckets))
+  # Rehearsal: no right on the live vod.gkoi.com distribution.
+  vod_distribution_ids = var.rehearsal ? [] : var.engine_cloudfront_distribution_ids
 }
 
 resource "aws_iam_role" "task" {
@@ -142,7 +145,7 @@ resource "aws_iam_role_policy" "cms" {
 }
 
 # Engine api + worker: the recordings buckets (D3: no static keys — the SDK default chain = this role), the VOD
-# distribution's invalidations, and the A7 metric namespace.
+# distribution's invalidations, and the A7 metric namespace. In rehearsal mode: the scratch bucket only, no invalidation.
 data "aws_iam_policy_document" "engine" {
   statement {
     sid       = "VodBuckets"
@@ -161,11 +164,11 @@ data "aws_iam_policy_document" "engine" {
     resources = [for b in local.vod_buckets : "arn:aws:s3:::${b}/*"]
   }
   dynamic "statement" {
-    for_each = length(var.engine_cloudfront_distribution_ids) > 0 ? [1] : []
+    for_each = length(local.vod_distribution_ids) > 0 ? [1] : []
     content {
       sid       = "VodInvalidation"
       actions   = ["cloudfront:CreateInvalidation", "cloudfront:GetInvalidation"]
-      resources = [for d in var.engine_cloudfront_distribution_ids : "arn:aws:cloudfront::${var.account_id}:distribution/${d}"]
+      resources = [for d in local.vod_distribution_ids : "arn:aws:cloudfront::${var.account_id}:distribution/${d}"]
     }
   }
   statement {

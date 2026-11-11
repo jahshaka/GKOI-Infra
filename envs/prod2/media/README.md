@@ -127,9 +127,12 @@ fine; all three regions must print the same digest.)
    packages, certs, pulls). Follow it in CloudWatch `/gkoi/prod2/media/<key>/bootstrap`, or over SSM:
    `aws ssm start-session --target <instance>` → `sudo /opt/gkoi-media/media-bootstrap.sh check` (exit 0 = EIP on the
    box, 4 certs, env files, every container healthy, lifecycle watcher up; it prints the agent's `/drain` report).
+   **Steps 2–5 are automated:** the rehearsal driver (`envs/prod2/rehearsal/README.md`: the rehearsal switch in
+   compute + media, the scratch bucket, `tools/gkoi-rehearsal`) runs them for every region from an ECS task and prints
+   PASS/FAIL. The manual version, for digging into a failure:
 2. **Registration:** the agent log shows its box id + pools; `redis-cli` (from an ECS Exec shell in engine-api) →
    `SMEMBERS relay:registry:pools`, `GET relay:registry:pool:<box>-p0` (TTL 30 s, re-written every 10 s). With the
-   engine unparked (rehearsal: api + worker — `RELAY_REGISTRY_ONLY=1` is compute's default now):
+   engine unparked (rehearsal: api + worker — compute `parked_services`; `RELAY_REGISTRY_ONLY=1` is compute's default now):
    `GET https://engine.gkoi.com/api/v1/app/regions` through the ALB (`curl --connect-to engine.gkoi.com:443:<alb dns>:443`)
    lists the region with its label and probe host `stream-<key>-p2.gkoi.com`; the engine logs no "dropped registration".
 3. **Go-live test:** a test user's relay session on the rehearsal DB (a copy of prod) placed in this region → the
@@ -137,17 +140,19 @@ fine; all three regions must print the same digest.)
    key); the agent's publish hook asks `/internal/relay/publish-auth` through the internal ALB → admitted; the session
    goes live; the api's watch proxy reads HLS from `<private ip>:18888` (proves the private SG path).
 4. **Recording:** stop the session; the agent uploads the pieces + playlist to the recordings bucket and posts the
-   vod event; the worker finalises it (check the vod row + the objects under its key). NOTE the bucket is the LIVE
-   `gkoi-beta-vods` (as the parked compute shares it — audit B3-7): a rehearsal recording is a few new objects there,
-   referenced only by the rehearsal DB. Delete them after, or point `recordings_bucket` (+ compute's) at a scratch
-   bucket for the rehearsal.
+   vod event; the worker finalises it (check the vod row + the objects under its key). The bucket: with `rehearsal =
+   true` here AND in compute, the data stack's SCRATCH bucket (`gkoi-prod2-rehearsal-vods-…`, 3-day expiry) — the
+   boxes' and the engine's roles then cannot write `gkoi-beta-vods` at all; without the switch it is the LIVE
+   `gkoi-beta-vods` (audit B3-7) — do not record there from the rehearsal DB.
 5. **HLS via the origin:** `curl -H "X-Origin-Verify: <the region's secret>" https://origin-live-<key>-p2.gkoi.com/r/<key>/live/<sid>/hls/index.m3u8`
-   from a CIDR in `origin_ingress_cidrs` (the SG admits only CloudFront otherwise) → 200 while live; without the header
+   from a CIDR in `origin_ingress_cidrs` (the SG admits only CloudFront otherwise; `rehearsal = true` adds the home NAT,
+   so an ECS task / ECS Exec shell can) → 200 while live; without the header
    → 403; an unknown session → 404. (A request through CloudFront needs the window's origin change.)
 6. **Drain / lifecycle:** over SSM `docker exec <agent> node -e …/drain` POST → the engine stops placing there; DELETE
    clears it. Optionally set the ASG desired to 0 once: the watcher drains, completes the hook; the registry entry
    expires within 30 s.
-7. Re-park the engine services. Repeat the proof for euc1 and use1.
+7. Re-park the engine services (and turn the rehearsal switch off — `envs/prod2/rehearsal/README.md` step 10). Repeat
+   the proof for euc1 and use1.
 
 ## The window (engine + FM + media, nobody live)
 
