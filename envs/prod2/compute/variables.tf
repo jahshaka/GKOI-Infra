@@ -333,10 +333,33 @@ variable "content_sync_host_key" {
   default     = "52.24.67.48 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL9XanMB8BekTf1He1rSTstBKMuyU0kVXZtyacMMhvlX"
 }
 
-variable "parked" {
-  description = "true = every service at 0 tasks (min = max = 0). The rehearsal state: the services share the LIVE buckets and call the live hosts, so they run only inside a switch-over window. Set false in the window's apply."
+variable "parked_services" {
+  description = <<-EOT
+    The services held at 0 tasks (min = max = 0). Default: ALL of them (the state since 2026-11-11 — the services share
+    the LIVE buckets and call the live hosts, so they run only inside a switch-over window). The private go-live
+    rehearsal runs the engine alone: ["cms", "fm-api", "fm-worker", "fm-web"] together with rehearsal = true
+    (envs/prod2/rehearsal/README.md). The window: []. Replaces the old all-or-nothing `parked` (true = this default,
+    false = []).
+  EOT
+  type        = set(string)
+  default     = ["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web"]
+  validation {
+    condition     = alltrue([for s in var.parked_services : contains(["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web"], s)])
+    error_message = "parked_services names services: cms, engine-api, engine-worker, fm-api, fm-worker, fm-web."
+  }
+}
+
+variable "rehearsal" {
+  description = <<-EOT
+    The private go-live rehearsal (envs/prod2/rehearsal/README.md). true = the engine (api, worker, migrator) records
+    into the data stack's SCRATCH bucket (S3_BUCKET = data output rehearsal_vods_bucket; VOD_BUCKETS dropped) and its
+    task roles reach ONLY that bucket — gkoi-beta-vods (the live one) is neither configured nor writable; the vod.gkoi.com
+    CDN is not used (CDN_DOWNLOAD_BASE and CDN_DISTRIBUTION_ID blank, no invalidation right). The plan refuses it unless
+    cms and the file manager stay parked (they share the live buckets). Flip it together with media's `rehearsal`.
+    NEVER true in the window: recordings would land in a bucket that expires them after 3 days.
+  EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "cms_source_cidrs" {

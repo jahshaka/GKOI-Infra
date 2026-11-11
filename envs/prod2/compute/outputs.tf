@@ -51,3 +51,12 @@ output "images" {
   description = "The image each task runs (repo@digest or repo:tag)."
   value       = local.image
 }
+
+output "rehearsal" {
+  description = "The rehearsal switch as applied: on/off, the engine's S3_BUCKET, the services NOT parked (the rehearsal stack's driver checks it)."
+  value = {
+    enabled       = var.rehearsal
+    engine_bucket = local.engine_bucket
+    running       = sort([for n, p in local.is_parked : n if !p && (n != "fm-web" || var.fm_web_enabled)])
+  }
+}

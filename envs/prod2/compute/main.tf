@@ -102,6 +102,20 @@ locals {
   ))
   unknown_secret_refs = sort([for k in local.referenced_secret_keys : k if !contains(local.secret_keys, k)])
 
+  # --- parking + the rehearsal switch ------------------------------------------------------------------------
+  is_parked = { for n in ["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web"] : n => contains(var.parked_services, n) }
+  # Running beside the engine in rehearsal mode would put a live-bucket service next to a scratch-bucket engine.
+  rehearsal_must_park = [for n in ["cms", "fm-api", "fm-worker", "fm-web"] : n if !local.is_parked[n]]
+  # The data stack's scratch bucket (null until data is applied with it).
+  rehearsal_bucket = try(local.data.rehearsal_vods_bucket.name, null)
+  # S3_BUCKET of the engine: the scratch bucket in rehearsal mode, else the live one.
+  engine_bucket = var.rehearsal ? coalesce(local.rehearsal_bucket, "UNRESOLVED-rehearsal-bucket") : var.engine_vod_bucket
+  # Rehearsal: no vod.gkoi.com (its origin is the LIVE bucket) — recording URLs are the scratch bucket's own, and the
+  # engine never invalidates the live distribution. Merged over the defaults, under var.engine_env.
+  rehearsal_engine_env = var.rehearsal ? { CDN_DOWNLOAD_BASE = "", CDN_DISTRIBUTION_ID = "" } : {}
+  # var.engine_env is merged last: in rehearsal mode it must not bring a bucket or the CDN back.
+  rehearsal_env_conflicts = var.rehearsal ? sort([for k in ["S3_BUCKET", "VOD_BUCKETS", "CDN_DOWNLOAD_BASE", "CDN_DISTRIBUTION_ID"] : k if contains(keys(var.engine_env), k)]) : []
+
   # --- plain environment (computed base, then the variable maps on top) -------------------------------------
   cms_server_env = merge(
     {
@@ -123,7 +137,7 @@ locals {
       POSTGRES_HOST       = local.data.db_endpoint
       POSTGRES_PORT       = tostring(local.data.db_port)
       POSTGRES_USER       = lookup(merge(local.default_engine_env, var.engine_env), "POSTGRES_APP_USER", "mikaido_app")
-      S3_BUCKET           = var.engine_vod_bucket
+      S3_BUCKET           = local.engine_bucket
       CDN_DISTRIBUTION_ID = length(var.engine_cloudfront_distribution_ids) > 0 ? var.engine_cloudfront_distribution_ids[0] : ""
       # With the edge sidecar the api's first proxy is 127.0.0.1 (the edge rebuilds X-Forwarded-For); without it the
       # ALB nodes (in this VPC) write X-Forwarded-For. PLUS the CMS's addresses (audit B3-5, prod: TRUSTED_PROXIES =
@@ -133,6 +147,7 @@ locals {
       TRUSTED_PROXIES = join(",", concat([var.engine_edge_sidecar ? "127.0.0.1" : local.vpc_cidr], var.cms_source_cidrs))
     },
     local.default_engine_env,
+    local.rehearsal_engine_env,
     var.engine_env,
   )
 
@@ -195,6 +210,18 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = length(local.unknown_secret_refs) == 0
       error_message = "Container secrets reference entries not in var.secrets: ${join(", ", local.unknown_secret_refs)}."
+    }
+    precondition {
+      condition     = !var.rehearsal || local.rehearsal_bucket != null
+      error_message = "rehearsal = true needs the data stack's scratch bucket (output rehearsal_vods_bucket): apply data first."
+    }
+    precondition {
+      condition     = !var.rehearsal || length(local.rehearsal_must_park) == 0
+      error_message = "rehearsal = true runs the engine alone; these share the LIVE buckets and must stay in parked_services: ${join(", ", local.rehearsal_must_park)}."
+    }
+    precondition {
+      condition     = length(local.rehearsal_env_conflicts) == 0
+      error_message = "rehearsal = true sets the engine's bucket and CDN itself; remove from var.engine_env: ${join(", ", local.rehearsal_env_conflicts)}."
     }
     precondition {
       condition     = length(local.unset_env) == 0

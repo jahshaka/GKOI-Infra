@@ -205,8 +205,8 @@ module "cms" {
   }
   health_check_grace_period_seconds = 300 # the boot runs both migrators before it listens
 
-  min_capacity          = var.parked ? 0 : (local.tg["cms"].min_capacity)
-  max_capacity          = var.parked ? 0 : (local.tg["cms"].max_capacity) # stays 1 until C16 is proven on 2 tasks
+  min_capacity          = local.is_parked["cms"] ? 0 : (local.tg["cms"].min_capacity)
+  max_capacity          = local.is_parked["cms"] ? 0 : (local.tg["cms"].max_capacity) # stays 1 until C16 is proven on 2 tasks
   cpu_target_percent    = var.cpu_target_percent
   wait_for_steady_state = var.wait_for_steady_state
 
@@ -243,8 +243,8 @@ module "engine_api" {
   }]
   health_check_grace_period_seconds = 60
 
-  min_capacity          = var.parked ? 0 : (local.tg["engine-api"].min_capacity)
-  max_capacity          = var.parked ? 0 : (local.tg["engine-api"].max_capacity)
+  min_capacity          = local.is_parked["engine-api"] ? 0 : (local.tg["engine-api"].min_capacity)
+  max_capacity          = local.is_parked["engine-api"] ? 0 : (local.tg["engine-api"].max_capacity)
   cpu_target_percent    = var.cpu_target_percent
   wait_for_steady_state = var.wait_for_steady_state
 
@@ -269,8 +269,8 @@ module "engine_worker" {
   subnet_ids         = local.subnets
   security_group_ids = local.tasks_sg
 
-  min_capacity          = var.parked ? 0 : (var.worker_capacity["engine-worker"].min)
-  max_capacity          = var.parked ? 0 : (var.worker_capacity["engine-worker"].max)
+  min_capacity          = local.is_parked["engine-worker"] ? 0 : (var.worker_capacity["engine-worker"].min)
+  max_capacity          = local.is_parked["engine-worker"] ? 0 : (var.worker_capacity["engine-worker"].max)
   cpu_target_percent    = var.cpu_target_percent
   wait_for_steady_state = var.wait_for_steady_state
 
@@ -300,8 +300,8 @@ module "fm_api" {
   }
   health_check_grace_period_seconds = 60
 
-  min_capacity          = var.parked ? 0 : (local.tg["fm-api"].min_capacity)
-  max_capacity          = var.parked ? 0 : (local.tg["fm-api"].max_capacity)
+  min_capacity          = local.is_parked["fm-api"] ? 0 : (local.tg["fm-api"].min_capacity)
+  max_capacity          = local.is_parked["fm-api"] ? 0 : (local.tg["fm-api"].max_capacity)
   cpu_target_percent    = var.cpu_target_percent
   wait_for_steady_state = var.wait_for_steady_state
 
@@ -324,8 +324,8 @@ module "fm_worker" {
   subnet_ids         = local.subnets
   security_group_ids = local.tasks_sg
 
-  min_capacity          = var.parked ? 0 : (var.worker_capacity["fm-worker"].min)
-  max_capacity          = var.parked ? 0 : (var.worker_capacity["fm-worker"].max)
+  min_capacity          = local.is_parked["fm-worker"] ? 0 : (var.worker_capacity["fm-worker"].min)
+  max_capacity          = local.is_parked["fm-worker"] ? 0 : (var.worker_capacity["fm-worker"].max)
   cpu_target_percent    = var.cpu_target_percent
   wait_for_steady_state = var.wait_for_steady_state
 
@@ -356,8 +356,8 @@ module "fm_web" {
     container_port   = 80
   } : null
 
-  min_capacity          = var.parked ? 0 : (var.fm_web_attach_lb ? local.tg["fm-web"].min_capacity : var.fm_web_capacity.min)
-  max_capacity          = var.parked ? 0 : (var.fm_web_attach_lb ? local.tg["fm-web"].max_capacity : var.fm_web_capacity.max)
+  min_capacity          = local.is_parked["fm-web"] ? 0 : (var.fm_web_attach_lb ? local.tg["fm-web"].min_capacity : var.fm_web_capacity.min)
+  max_capacity          = local.is_parked["fm-web"] ? 0 : (var.fm_web_attach_lb ? local.tg["fm-web"].max_capacity : var.fm_web_capacity.max)
   cpu_target_percent    = var.cpu_target_percent
   wait_for_steady_state = var.wait_for_steady_state
 

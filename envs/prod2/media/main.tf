@@ -75,6 +75,17 @@ locals {
   bundle_hash   = substr(sha256(join("\n", [for f in local.bundle_files : "${f} ${local.bundle_sha[f]}"])), 0, 16)
   bundle_prefix = "${var.bundle_prefix}/"
 
+  # ---- the rehearsal switch (envs/prod2/rehearsal/README.md) ------------------------------------------------------
+  # The data stack's scratch bucket (null until data is applied with it). Rehearsal: every box records there, its role
+  # reaches ONLY it (the live gkoi-beta-vods is neither configured nor writable), and the home NAT's addresses may
+  # reach each origin's 443 (the rehearsal driver runs in an ECS task and leaves by the NAT).
+  rehearsal_bucket  = try(local.data.rehearsal_vods_bucket.name, null)
+  recordings_bucket = var.rehearsal ? coalesce(local.rehearsal_bucket, "UNRESOLVED-rehearsal-bucket") : var.recordings_bucket
+  extra_vod_buckets = var.rehearsal ? [] : var.extra_vod_buckets
+  rehearsal_origin  = var.rehearsal ? [for ip in try(local.net.home_nat_public_ips, []) : "${ip}/32"] : []
+  rehearsal_on_live = var.rehearsal ? [for k, v in local.enabled : k if v.serve_live_names || v.manage_live_records] : []
+  origin_ingress    = { for k, v in local.enabled : k => distinct(concat(v.origin_ingress_cidrs, local.rehearsal_origin)) }
+
   # ---- the engine's private api address -------------------------------------------------------------------------
   portal_internal_url = var.engine_internal_url_override != "" ? var.engine_internal_url_override : try(local.engine_internal.url, "")
 
@@ -103,9 +114,9 @@ locals {
     S3_ENDPOINT_INTERNAL = "https://s3.${var.recordings_bucket_region}.amazonaws.com"
     S3_ENDPOINT_PUBLIC   = "https://s3.${var.recordings_bucket_region}.amazonaws.com"
     S3_REGION            = var.recordings_bucket_region
-    S3_BUCKET            = var.recordings_bucket
+    S3_BUCKET            = local.recordings_bucket
     # S3_ACCESS_KEY / S3_SECRET_KEY deliberately absent: the AWS SDK's default chain = the instance role (D3).
-  }, length(var.extra_vod_buckets) > 0 ? { VOD_BUCKETS = jsonencode([for b in var.extra_vod_buckets : { bucket = b }]) } : {}, var.agent_env)
+  }, length(local.extra_vod_buckets) > 0 ? { VOD_BUCKETS = jsonencode([for b in local.extra_vod_buckets : { bucket = b }]) } : {}, var.agent_env)
 
   # ---- per-region config (the SSM parameter's body; the module adds the EIP + ASG facts) ------------------------
   config = {
@@ -173,7 +184,7 @@ locals {
     "arn:aws:s3:::${var.bundle_bucket}/${var.bundle_prefix}/*",
     "arn:aws:s3:::${var.bundle_bucket}/mikaido/*/source.zip",
   ]
-  recordings_buckets = distinct(concat([var.recordings_bucket], var.extra_vod_buckets))
+  recordings_buckets = distinct(concat([local.recordings_bucket], local.extra_vod_buckets))
   ecr_repositories   = distinct(["gkoi/media-agent", "gkoi/mediamtx", var.media_origin_ecr_repo])
 }
 
@@ -192,6 +203,18 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = local.portal_internal_url != ""
       error_message = "No PORTAL_INTERNAL_URL: apply edge-alb (its engine_internal output — the internal ALB) first, or set engine_internal_url_override."
+    }
+    precondition {
+      condition     = !var.rehearsal || local.rehearsal_bucket != null
+      error_message = "rehearsal = true needs the data stack's scratch bucket (output rehearsal_vods_bucket): apply data first."
+    }
+    precondition {
+      condition     = length(local.rehearsal_on_live) == 0
+      error_message = "rehearsal = true with live names (serve_live_names / manage_live_records) on: ${join(", ", local.rehearsal_on_live)} — live recordings would land in the 3-day scratch bucket. Turn rehearsal off first."
+    }
+    precondition {
+      condition     = !var.rehearsal || length(setintersection(keys(var.agent_env), ["S3_BUCKET", "VOD_BUCKETS", "S3_REGION"])) == 0
+      error_message = "rehearsal = true sets the agents' bucket itself; remove S3_BUCKET / VOD_BUCKETS / S3_REGION from var.agent_env."
     }
     precondition {
       condition     = length(local.enabled) == length({ for k, v in var.media_regions : k => v if v.enabled })
@@ -266,7 +289,7 @@ module "box_usw2" {
   max_size                    = local.enabled.usw2.max_size
   desired_capacity            = local.enabled.usw2.desired_capacity
   pool_count                  = local.enabled.usw2.pool_count
-  origin_ingress_cidrs        = local.enabled.usw2.origin_ingress_cidrs
+  origin_ingress_cidrs        = local.origin_ingress.usw2
   origin_open_to_world        = local.enabled.usw2.origin_open_to_world
   rehearsal_records           = local.rehearsal_records.usw2
   live_records                = local.live_records.usw2
@@ -301,7 +324,7 @@ module "box_euc1" {
   max_size                    = local.enabled.euc1.max_size
   desired_capacity            = local.enabled.euc1.desired_capacity
   pool_count                  = local.enabled.euc1.pool_count
-  origin_ingress_cidrs        = local.enabled.euc1.origin_ingress_cidrs
+  origin_ingress_cidrs        = local.origin_ingress.euc1
   origin_open_to_world        = local.enabled.euc1.origin_open_to_world
   rehearsal_records           = local.rehearsal_records.euc1
   live_records                = local.live_records.euc1
@@ -336,7 +359,7 @@ module "box_use1" {
   max_size                    = local.enabled.use1.max_size
   desired_capacity            = local.enabled.use1.desired_capacity
   pool_count                  = local.enabled.use1.pool_count
-  origin_ingress_cidrs        = local.enabled.use1.origin_ingress_cidrs
+  origin_ingress_cidrs        = local.origin_ingress.use1
   origin_open_to_world        = local.enabled.use1.origin_open_to_world
   rehearsal_records           = local.rehearsal_records.use1
   live_records                = local.live_records.use1

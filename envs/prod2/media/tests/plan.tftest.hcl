@@ -225,3 +225,76 @@ run "live_records_plan" {
     error_message = "live"
   }
 }
+
+# The rehearsal switch: the scratch bucket everywhere (agent env + role), the NAT on every origin's 443.
+run "rehearsal_on" {
+  command = apply
+  variables {
+    rehearsal = true
+  }
+  override_data {
+    target = data.terraform_remote_state.data
+    values = { outputs = { valkey_security_group_id = "sg-valkey", rehearsal_vods_bucket = { name = "gkoi-prod2-rehearsal-vods-127214190346", arn = "arn:aws:s3:::gkoi-prod2-rehearsal-vods-127214190346", region = "us-west-2", days = 3 } } }
+  }
+  override_data {
+    target = data.terraform_remote_state.network
+    values = {
+      outputs = {
+        home_key                    = "usw2"
+        home_cidr                   = "10.10.0.0/16"
+        home_vpc_id                 = "vpc-home"
+        home_private_subnet_ids     = ["subnet-p1", "subnet-p2"]
+        home_nat_public_ips         = ["32.189.104.202"]
+        ecs_tasks_security_group_id = "sg-tasks"
+        regions = {
+          usw2 = { cidr = "10.10.0.0/16", vpc_id = "vpc-home", public_subnet_ids = ["subnet-a", "subnet-b"] }
+          euc1 = { cidr = "10.20.0.0/16", vpc_id = "vpc-euc1", public_subnet_ids = ["subnet-c", "subnet-d"] }
+          use1 = { cidr = "10.30.0.0/16", vpc_id = "vpc-use1", public_subnet_ids = ["subnet-e", "subnet-f"] }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = local.config.euc1.agent_env.S3_BUCKET == "gkoi-prod2-rehearsal-vods-127214190346" && local.config.usw2.agent_env.S3_BUCKET == "gkoi-prod2-rehearsal-vods-127214190346"
+    error_message = "agent bucket"
+  }
+  assert {
+    condition     = jsonencode(local.recordings_buckets) == jsonencode(["gkoi-prod2-rehearsal-vods-127214190346"])
+    error_message = "role buckets: the live bucket must be gone"
+  }
+  assert {
+    condition     = jsonencode(local.origin_ingress.use1) == jsonencode(["32.189.104.202/32"]) && !contains(keys(local.config.usw2.agent_env), "VOD_BUCKETS")
+    error_message = "origin CIDRs / VOD_BUCKETS"
+  }
+}
+
+run "rehearsal_off_is_live_bucket" {
+  command = plan
+  assert {
+    condition     = local.config.usw2.agent_env.S3_BUCKET == "gkoi-beta-vods" && length(local.origin_ingress.usw2) == 0
+    error_message = "rehearsal off = today's config"
+  }
+}
+
+run "rehearsal_refused_on_live_names" {
+  command = plan
+  variables {
+    rehearsal = true
+    media_regions = {
+      usw2 = { enabled = true, label = "Oregon", rehearsal_stream_host = "stream-usw2-p2.gkoi.com", rehearsal_origin_host = "origin-live-usw2-p2.gkoi.com", live_stream_host = "stream.gkoi.com", live_origin_host = "origin-live-usw2.gkoi.com", origin_verify_secret = "gkoi/media/usw2/origin-verify", serve_live_names = true }
+    }
+  }
+  override_data {
+    target = data.terraform_remote_state.data
+    values = { outputs = { valkey_security_group_id = "sg-valkey", rehearsal_vods_bucket = { name = "gkoi-prod2-rehearsal-vods-127214190346" } } }
+  }
+  expect_failures = [terraform_data.preflight]
+}
+
+run "rehearsal_refused_without_bucket" {
+  command = plan
+  variables {
+    rehearsal = true
+  }
+  expect_failures = [terraform_data.preflight]
+}

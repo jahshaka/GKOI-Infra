@@ -10,6 +10,7 @@ output "boxes" {
   description = "Per enabled region: the ASG, the Elastic IP, the config parameter, the DNS names this stack manages."
   value = {
     for k, b in local.boxes : k => {
+      region            = local.config[k].region
       asg               = b.asg_name
       eip               = b.eip_public_ip
       config_parameter  = b.config_parameter
@@ -43,4 +44,13 @@ output "media_origin_images" {
 
 output "engine_release" {
   value = { tag = local.engine_source.tag, commit = local.engine_source.commit, images = local.image_ref }
+}
+
+output "rehearsal" {
+  description = "The rehearsal switch as applied: on/off, the bucket every agent records into, the extra origin CIDRs."
+  value = {
+    enabled           = var.rehearsal
+    recordings_bucket = local.recordings_bucket
+    origin_cidrs      = local.rehearsal_origin
+  }
 }
