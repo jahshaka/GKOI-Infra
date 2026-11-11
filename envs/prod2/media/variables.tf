@@ -65,6 +65,7 @@ variable "media_regions" {
       live_stream_host      = "stream.gkoi.com"
       live_origin_host      = "origin-live-usw2.gkoi.com"
       origin_verify_secret  = "gkoi/media/usw2/origin-verify"
+      serve_live_names      = true
     }
     euc1 = {
       enabled               = true
@@ -74,6 +75,7 @@ variable "media_regions" {
       live_stream_host      = "stream-euc1.gkoi.com"
       live_origin_host      = "origin-live-euc1.gkoi.com"
       origin_verify_secret  = "gkoi/media/euc1/origin-verify"
+      serve_live_names      = true
     }
     use1 = {
       enabled               = true
@@ -83,6 +85,8 @@ variable "media_regions" {
       live_stream_host      = "stream-use1.gkoi.com"
       live_origin_host      = "origin-live-use1.gkoi.com"
       origin_verify_secret  = "gkoi/media/use1/origin-verify"
+      serve_live_names      = true
+      manage_live_records   = true
     }
   }
   validation {
@@ -209,7 +213,7 @@ variable "rehearsal" {
     roll.sh (the role's rights change at once; the agent's env at the roll). Flip it together with compute's `rehearsal`.
   EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "recordings_bucket_region" {
