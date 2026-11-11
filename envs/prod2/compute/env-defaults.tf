@@ -9,20 +9,20 @@ locals {
     LOG_LEVEL               = "info"
     SITE_URL                = "https://www.gkoi.com"
     TRUST_PROXY             = "loopback"   # the task's own nginx on 127.0.0.1
-    DB_NAME                 = "__SET_ME__" # as the P1 restore names it
-    DB_USER                 = "__SET_ME__" # the CMS database's owner role (not the RDS master)
+    DB_NAME                 = "aisolver_cms"  # from prod (2026-11-11)
+    DB_USER                 = "cms"  # from prod (2026-11-11)
     PGSSLMODE               = "require"    # verify-full needs the RDS CA bundle in the image (README "TLS to RDS")
     CONTENT_DIR             = "/data/content"
     NGINX_CACHE_DIR         = "/data/nginx-cache"
-    SESSION_COOKIE_NAME     = "__SET_ME__" # MUST equal prod's, or every browser is signed out once
+    SESSION_COOKIE_NAME     = "__Host-gkoi_session"  # from prod (2026-11-11)
     MIKAIDO_ENGINE_URL      = "https://engine.gkoi.com"
     FILES_SERVICE_URL       = "https://files.gkoi.com"
     APP_SERVICE_PUBLIC_URLS = "{\"mikaido\":\"https://engine.gkoi.com\",\"files\":\"https://files.gkoi.com\"}"
     LABS_COUNTRY_HEADER     = "cloudfront"
-    SMTP_HOST               = "__SET_ME__"
-    SMTP_PORT               = "__SET_ME__"
-    SMTP_USER               = "__SET_ME__"
-    MAIL_FROM               = "__SET_ME__"
+    SMTP_HOST               = ""  # from prod (2026-11-11)
+    SMTP_PORT               = ""  # from prod (2026-11-11)
+    SMTP_USER               = ""  # from prod (2026-11-11)
+    MAIL_FROM               = ""  # from prod (2026-11-11)
   }
 
   default_cms_nginx_env = {
@@ -57,11 +57,11 @@ locals {
     PUBLIC_API_URL           = "https://www.gkoi.com/streaming"
     PORTAL_URL               = "https://www.gkoi.com"
     SITE_SERVICE_URL         = "https://www.gkoi.com"
-    RELAY_POOL_INSTANCES     = "__SET_ME__" # prod's JSON line (one entry per media pool, both regions)
-    MK_POOL_API_USER         = "__SET_ME__"
-    TWITCH_CLIENT_ID         = "__SET_ME__"
-    GOOGLE_CLIENT_ID         = "__SET_ME__"
-    KICK_CLIENT_ID           = "__SET_ME__"
+    RELAY_POOL_INSTANCES     = "[{\"id\":\"mk-pool-0\",\"region\":\"us-west-2\",\"controlBaseUrl\":\"http://mk-pool-0:9997\",\"internalHost\":\"mk-pool-0\",\"publicHost\":\"stream.gkoi.com\",\"publicRtmpPort\":11935,\"publicRtmpsPort\":11936,\"apiHost\":\"172.26.12.2\",\"apiHlsPort\":18888,\"apiWhipPort\":18889,\"apiControlBaseUrl\":\"http://172.26.12.2:19997\",\"liveOriginBase\":\"https://live.gkoi.com\"},{\"id\":\"mk-pool-1\",\"region\":\"us-west-2\",\"controlBaseUrl\":\"http://mk-pool-1:9997\",\"internalHost\":\"mk-pool-1\",\"publicHost\":\"stream.gkoi.com\",\"publicRtmpPort\":21935,\"publicRtmpsPort\":21936,\"apiHost\":\"172.26.12.2\",\"apiHlsPort\":28888,\"apiWhipPort\":28889,\"apiControlBaseUrl\":\"http://172.26.12.2:29997\",\"liveOriginBase\":\"https://live.gkoi.com\"},{\"id\":\"euc1-0\",\"region\":\"eu-central-1\",\"controlBaseUrl\":\"http://mk-pool-0:9997\",\"internalHost\":\"mk-pool-0\",\"publicHost\":\"stream-euc1.gkoi.com\",\"publicRtmpPort\":11935,\"publicRtmpsPort\":11936,\"apiHost\":\"10.88.0.2\",\"apiHlsPort\":18888,\"apiWhipPort\":18889,\"apiControlBaseUrl\":\"http://10.88.0.2:19997\",\"liveOriginBase\":\"https://live.gkoi.com\"},{\"id\":\"euc1-1\",\"region\":\"eu-central-1\",\"controlBaseUrl\":\"http://mk-pool-1:9997\",\"internalHost\":\"mk-pool-1\",\"publicHost\":\"stream-euc1.gkoi.com\",\"publicRtmpPort\":21935,\"publicRtmpsPort\":21936,\"apiHost\":\"10.88.0.2\",\"apiHlsPort\":28888,\"apiWhipPort\":28889,\"apiControlBaseUrl\":\"http://10.88.0.2:29997\",\"liveOriginBase\":\"https://live.gkoi.com\"}]"  # from prod (2026-11-11)
+    MK_POOL_API_USER         = "mkpool"  # from prod (2026-11-11)
+    TWITCH_CLIENT_ID         = ""  # from prod (2026-11-11)
+    GOOGLE_CLIENT_ID         = ""  # from prod (2026-11-11)
+    KICK_CLIENT_ID           = ""  # from prod (2026-11-11)
   }
 
   default_engine_edge_env = {
@@ -88,7 +88,7 @@ locals {
     S3_REGION                = "us-west-2"
     S3_FORCE_PATH_STYLE      = "0"
     CDN_DOWNLOAD_BASE        = "https://dl.gkoi.com"
-    CDN_KEY_PAIR_ID          = "__SET_ME__"
+    CDN_KEY_PAIR_ID          = "K2DJ50W8CDZ68L"  # from prod (2026-11-11)
     ASSETS_ORPHAN_SWEEP_MODE = "report"
   }
 }
