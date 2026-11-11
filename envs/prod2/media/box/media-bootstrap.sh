@@ -8,8 +8,9 @@
 #   media-bootstrap.sh render                  print the compose file it would run (secrets are in env files, never printed)
 #
 # The phases, in order:
-#   packages   apt basics, Docker CE + compose (key fingerprint pinned), the AWS CLI (snap), certbot + dns-route53 (snap),
-#              UTC, chrony on the Amazon Time Sync Service; the SSM agent (snap, preinstalled on Canonical's AMI) running
+#   packages   apt basics, Docker CE + compose (key fingerprint pinned), the AWS CLI (snap, else the pinned v2 zip),
+#              certbot + dns-route53 (snap, else Ubuntu's packages, else a venv), UTC, chrony on the Amazon Time Sync
+#              Service; the SSM agent (snap, preinstalled on Canonical's AMI) running
 #   config     the SSM parameter → /etc/gkoi-media/config.json; the box bundle (every file sha256-checked; a changed
 #              media-bootstrap.sh re-executes itself); the engine release's own config files (pool.yml, the pool and
 #              media-origin entrypoints, the origin template) out of its source.zip, checked against releases/mikaido.json
@@ -88,16 +89,15 @@ phase_packages() {
   fi
   say "docker: $(docker --version) + compose $(docker compose version --short)"
 
-  have snap || die "no snapd (the AWS CLI, certbot and the SSM agent come from snaps)"
-  have aws || { snap install aws-cli --classic || die "snap install aws-cli failed"; }
-  snap list certbot >/dev/null 2>&1 || { snap install certbot --classic || die "snap install certbot failed"; }
-  [ -e /usr/bin/certbot ] || ln -s /snap/bin/certbot /usr/bin/certbot
-  [ "$(snap get certbot trust-plugin-with-root 2>/dev/null)" = ok ] || snap set certbot trust-plugin-with-root=ok
-  snap list certbot-dns-route53 >/dev/null 2>&1 || { snap install certbot-dns-route53 || die "snap install certbot-dns-route53 failed"; }
-  snap connect certbot:plugin certbot-dns-route53 2>/dev/null || true
-  snap list amazon-ssm-agent >/dev/null 2>&1 || { snap install amazon-ssm-agent --classic || die "snap install amazon-ssm-agent failed"; }
-  systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service \
-    || { snap start --enable amazon-ssm-agent || die "cannot start the SSM agent"; }
+  # The snap store is optional (media-lib.sh): snap first with short retries, then the pinned AWS CLI zip / Ubuntu's
+  # certbot packages / a certbot venv. The SSM agent is Canonical's preinstalled snap: only started if it is not running.
+  ensure_aws_cli
+  ensure_certbot
+  say "certbot: $(certbot --version 2>&1 | tail -1) ($(certbot_kind)) with dns-route53, renewed by $(certbot_renew_timer)"
+  if ! ssm_agent_active; then
+    if snap list amazon-ssm-agent >/dev/null 2>&1; then snap start --enable amazon-ssm-agent || warn "cannot start the SSM agent"
+    else snap_try install amazon-ssm-agent --classic || warn "no SSM agent (snap store unreachable): the box works, but no SSM access"; fi
+  fi
 
   [ "$(timedatectl show -p Timezone --value 2>/dev/null)" = UTC ] || timedatectl set-timezone UTC
   local tmp; tmp="$(mktemp)"
@@ -311,7 +311,8 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now gkoi-media-cert-retry.timer >/dev/null 2>&1 || warn "cert retry timer not enabled"
-  systemctl is-enabled --quiet snap.certbot.renew.timer 2>/dev/null || warn "certbot's renew timer is not enabled"
+  local timer; timer="$(certbot_renew_timer)"
+  systemctl is-enabled --quiet "$timer" 2>/dev/null || warn "certbot's renew timer ($timer) is not enabled"
   say "certs: $(jq -r '.cert_hosts | join(", ")' "$CFG")"
 }
 

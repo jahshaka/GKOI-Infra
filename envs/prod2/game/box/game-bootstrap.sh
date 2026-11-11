@@ -71,7 +71,6 @@ base_matchd() { printf '%s/config/matchd.%s.json' "$WR" "$(cfg .warroom_env)"; }
 # =====================================================================================================================
 phase_config() {
   local region key param val tmp
-  have aws || { snap install aws-cli --classic || die "snap install aws-cli failed"; }
   local missing=() t
   for t in jq unzip rsync; do have "$t" || missing+=("$t"); done
   if [ ${#missing[@]} -gt 0 ]; then
@@ -79,6 +78,7 @@ phase_config() {
     DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -yq --no-install-recommends "${missing[@]}" \
       || die "apt-get install ${missing[*]} failed"
   fi
+  ensure_aws_cli # the snap with short retries, else the pinned zip (game-lib.sh) — unzip first
   region="$(own_region)" || die "no region from IMDS"
   key="$(cfg .key)" || die "no key in $CFG (the user-data writes the first copy)"
   param="/gkoi/prod2/game/$key/config"

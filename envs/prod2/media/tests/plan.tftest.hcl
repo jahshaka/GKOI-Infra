@@ -371,7 +371,7 @@ run "default_four_regions" {
   }
 }
 
-# Tokyo (2026-11-11): its own provider + ECR replica, the label, the REHEARSAL names (no live record yet), its secret.
+# Tokyo (2026-11-11): its own provider + ECR replica, the label, the LIVE names from the first boot (path B), its secret.
 run "tokyo_default" {
   command = plan
   assert {
@@ -379,12 +379,12 @@ run "tokyo_default" {
     error_message = "apne1 region / label / registry"
   }
   assert {
-    condition     = local.config.apne1.stream_host == "stream-apne1-p2.gkoi.com" && local.config.apne1.origin_host == "origin-live-apne1-p2.gkoi.com"
-    error_message = "apne1 starts on the rehearsal names"
+    condition     = local.config.apne1.stream_host == "stream-apne1.gkoi.com" && local.config.apne1.origin_host == "origin-live-apne1.gkoi.com"
+    error_message = "apne1 serves its live names from the first boot (path B, a01ff91)"
   }
   assert {
-    condition     = jsonencode(local.rehearsal_records.apne1) == jsonencode(["stream-apne1-p2.gkoi.com", "origin-live-apne1-p2.gkoi.com"]) && length(local.live_records.apne1) == 0
-    error_message = "apne1 records: rehearsal only"
+    condition     = jsonencode(local.rehearsal_records.apne1) == jsonencode(["stream-apne1-p2.gkoi.com", "origin-live-apne1-p2.gkoi.com"]) && jsonencode(local.live_records.apne1) == jsonencode(["stream-apne1.gkoi.com", "origin-live-apne1.gkoi.com"])
+    error_message = "apne1 records: rehearsal + live"
   }
   assert {
     condition     = jsonencode(local.config.apne1.cert_hosts) == jsonencode(["stream-apne1-p2.gkoi.com", "origin-live-apne1-p2.gkoi.com", "stream-apne1.gkoi.com", "origin-live-apne1.gkoi.com"])
@@ -399,7 +399,7 @@ run "tokyo_default" {
     error_message = "apne1 user data / log prefix"
   }
   assert {
-    condition     = length(module.box_apne1[0].records) == 2 && local.config.apne1.live_origin_base == "https://live.gkoi.com"
+    condition     = length(module.box_apne1[0].records) == 4 && local.config.apne1.live_origin_base == "https://live.gkoi.com"
     error_message = "apne1 box"
   }
 }

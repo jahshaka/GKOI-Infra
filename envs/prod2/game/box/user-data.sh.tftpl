@@ -2,6 +2,8 @@
 # GKOI game box user-data (rendered by envs/prod2/game; NO secrets here — only where the box's config lives).
 # Fetches the game-box bundle named by the config parameter, checks every file's sha256, then runs game-bootstrap.sh apply.
 # Everything after this point is idempotent and re-runnable over SSM: /opt/gkoi-game/game-bootstrap.sh apply
+# No AWS CLI and no snap store here (api.snapcraft.io was flaky / unreachable for new boxes, 2026-11-11): the config and
+# the bundle come through python3-boto3 (on Canonical's 24.04 AMI; apt-installed if missing) with the instance role.
 set -euo pipefail
 exec >>/var/log/gkoi-game-bootstrap.log 2>&1
 echo "== user-data $(date -u +%FT%TZ)"
@@ -12,27 +14,38 @@ BOX=/opt/gkoi-game
 install -d -m 0755 "$BOX" /etc/gkoi-game
 # unattended-upgrades holds the dpkg lock at first boot: every apt-get on this box (ops/warroom-game's bootstrap.sh too) waits.
 printf 'DPkg::Lock::Timeout "600";\n' > /etc/apt/apt.conf.d/90-gkoi-lock-timeout
-command -v aws >/dev/null 2>&1 || snap install aws-cli --classic
-PATH="/snap/bin:$PATH"
-# Captured, not redirected: under SSM / early boot the snap aws CLI can write NOTHING to a redirected file and exit 0.
-val=""
-for i in 1 2 3 4 5 6; do
-  val="$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --query Parameter.Value --output text)" && [ -n "$val" ] && break
-  echo "config parameter not readable yet (attempt $i)"; sleep 10
-done
-printf '%s\n' "$val" > /etc/gkoi-game/config.json.new
-python3 -c 'import json,sys; json.load(open(sys.argv[1]))' /etc/gkoi-game/config.json.new
-mv /etc/gkoi-game/config.json.new /etc/gkoi-game/config.json
-python3 - /etc/gkoi-game/config.json >/tmp/gkoi-game-bundle.list <<'PY'
-import json, sys
-b = json.load(open(sys.argv[1]))["bundle"]
-for f, sha in sorted(b["files"].items()):
-    print(b["bucket"], b["region"], b["prefix"] + f, f, sha)
+python3 -c 'import boto3' 2>/dev/null || {
+  DEBIAN_FRONTEND=noninteractive apt-get update -q
+  DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends python3-boto3
+}
+python3 - "$REGION" "$PARAM" /etc/gkoi-game/config.json "$BOX" <<'PY'
+import boto3, hashlib, json, os, re, sys, time
+region, param, cfg_path, box = sys.argv[1:5]
+ssm = boto3.client("ssm", region_name=region)
+for i in range(1, 7):
+    try:
+        val = ssm.get_parameter(Name=param)["Parameter"]["Value"]
+        break
+    except Exception as e:
+        print("config parameter not readable yet (attempt %d): %s" % (i, e), flush=True)
+        time.sleep(10)
+else:
+    sys.exit("cannot read " + param)
+b = json.loads(val)["bundle"]
+with open(cfg_path + ".new", "w") as f:
+    f.write(val + "\n")
+os.replace(cfg_path + ".new", cfg_path)
+s3 = boto3.client("s3", region_name=b["region"])
+for name, sha in sorted(b["files"].items()):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name.startswith("."):
+        sys.exit("bundle file name is not plain: " + name)
+    data = s3.get_object(Bucket=b["bucket"], Key=b["prefix"] + name)["Body"].read()
+    if hashlib.sha256(data).hexdigest() != sha:
+        sys.exit("sha256 mismatch: " + name)
+    with open(os.path.join(box, name + ".new"), "wb") as f:
+        f.write(data)
+    os.replace(os.path.join(box, name + ".new"), os.path.join(box, name))
+print("bundle: %d files" % len(b["files"]), flush=True)
 PY
-while read -r bucket bregion key file sha; do
-  aws s3 cp --only-show-errors --region "$bregion" "s3://$bucket/$key" "$BOX/$file.new"
-  echo "$sha  $BOX/$file.new" | sha256sum -c --quiet -
-  mv "$BOX/$file.new" "$BOX/$file"
-done </tmp/gkoi-game-bundle.list
 chmod 0755 "$BOX"/*.sh
 exec "$BOX/game-bootstrap.sh" apply

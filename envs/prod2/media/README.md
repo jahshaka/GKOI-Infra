@@ -70,7 +70,8 @@ group `gkoi-prod2-engine-api-int`, its SG admitting every peered edge VPC on 300
   (0600, single-quoted literal values). The resolver secret between nginx and the agent is box-local (generated once).
 - **TLS:** Let's Encrypt per hostname by DNS-01 with the instance role (as the live box: `certbot --dns-route53`, ECDSA,
   lineage `/etc/letsencrypt/live/<host>/` — the path MediaMTX and the origin read). All four names of a region (2
-  rehearsal + 2 live) are issued at first boot, so the window needs no cert step. Renewal: certbot's snap timer →
+  rehearsal + 2 live) are issued at first boot, so the window needs no cert step. Renewal: certbot's own timer
+  (`snap.certbot.renew.timer` / Ubuntu's `certbot.timer` / `gkoi-certbot-renew.timer` — "No snap store needed" below) →
   `cert-hook.sh` (origin: `nginx -s reload`; pools: restart only when the box is idle, else an hourly retry — the
   engine's own hook rule). The plan's "wildcard in Secrets Manager" was not needed: per-name DNS-01 works on EC2.
 - **The ASG** gives self-healing (a failed box is replaced) and the drain hook; with one EIP per region it is held at
@@ -187,6 +188,28 @@ for the rollback (stream.gkoi.com + origin-live-usw2 → `34.212.239.200`, strea
   `serve_live_names = false`, apply. Skipping (3) makes the plan STOP (`prevent_destroy`) instead of deleting a live
   name — on purpose.
 - **A bad release:** revert `releases/mikaido.json` (or `var.images`), apply, `roll.sh --drain-wait 60`.
+
+## No snap store needed (2026-11-11)
+
+The first Tokyo box could not reach `api.snapcraft.io` for 15+ minutes (and two game boxes hit the same flakiness that
+day), so nothing on a box depends on the snap store any more:
+
+- **user-data** (media + game) no longer uses the AWS CLI at all: the config parameter and the bundle are fetched with
+  `python3-boto3` (on Canonical's 24.04 AMI — cloud-image manifest; apt-installed if a future AMI lacks it) with the
+  instance role, every file sha256-checked as before.
+- **The AWS CLI** (`media-lib.sh` / `game-lib.sh` `ensure_aws_cli`): an `aws` that runs is kept; else the snap (three
+  tries, 90 s each); else the pinned v2 zip `awscli-exe-linux-x86_64-2.39.7.zip` (sha256 `707a900f…`, whose PGP signature
+  was checked against the AWS CLI Team key FB5D B77F … 475C on 2026-11-11) into `/usr/local/aws-cli` + `/usr/local/bin/aws`.
+  Bump `AWSCLI_VERSION` + `AWSCLI_SHA256` together (in BOTH libs).
+- **certbot + dns-route53** (`media-lib.sh` `ensure_certbot`): a certbot that lists `dns-route53` is kept; else the snaps;
+  else Ubuntu's `certbot` + `python3-certbot-dns-route53` (noble universe 2.9.0, renewed by `certbot.timer`); else a venv
+  `/opt/certbot` (certbot + certbot-dns-route53 5.10.0 from PyPI, renewed by `gkoi-certbot-renew.timer`, written here).
+  The deploy hook stays `/etc/letsencrypt/renewal-hooks/deploy/gkoi-media` → `cert-hook.sh` (every variant runs it).
+  After three failed snap attempts the store counts as down for the rest of the run.
+- **The SSM agent**: left alone when running (Canonical's preinstalled snap); started if installed but stopped; a missing
+  agent is only a warning.
+- **Game boxes:** certbot and the SSM check live in the War Room tool (`ops/warroom-game/bootstrap.sh`, GKOIBuilder_AI),
+  which still requires the snaps — not changed here.
 
 ## Releases
 
