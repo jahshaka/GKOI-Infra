@@ -1,0 +1,14 @@
+{
+  "built_at": "2026-11-11T10:57:51Z",
+  "codebuild_build_id": "gkoi-build-warroom-game:e780054e-ac97-4641-86d1-843547380825",
+  "commit": "704e7de092753731ed3ac0d96faf0329f417ecdf",
+  "images": {
+    "warroom-game": {
+      "digest": "sha256:9dc05d31f562b459741a1e9ac131d1bf770d34df0a68585a01f5c2a4d51d02c4",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/warroom-game@sha256:9dc05d31f562b459741a1e9ac131d1bf770d34df0a68585a01f5c2a4d51d02c4"
+    }
+  },
+  "repo": "warroom-game",
+  "source_sha256": "faf73698ffca0ca8a15120c311e873237b5b4e4b269311f6dca70bf7afd67a95",
+  "tag": "1.0.15.3.3-h6"
+}
