@@ -342,7 +342,7 @@ variable "parked_services" {
     false = []).
   EOT
   type        = set(string)
-  default     = ["cms"]
+  default     = []
   validation {
     condition     = alltrue([for s in var.parked_services : contains(["cms", "engine-api", "engine-worker", "fm-api", "fm-worker", "fm-web"], s)])
     error_message = "parked_services names services: cms, engine-api, engine-worker, fm-api, fm-worker, fm-web."
