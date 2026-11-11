@@ -29,8 +29,9 @@ modules/
   ecr-creation-template/ replica settings for gkoi/* in a replication destination region
   region-log-groups/     log groups in one region + a read of its existing gkoi-ops-alerts topic
   ecs-service/           one Fargate task definition + ECS service (surge 100/200, circuit breaker, Exec) + CPU target tracking
+  media-box/             one region's media box: ASG (1) + launch template, EIP, SGs, /gkoi/ role, SSM config, DNS, alarms
 envs/prod2/
-  network/  edge-alb/  data/  registry/  observability/  compute/      one state file each: prod2/<stack>/terraform.tfstate
+  network/  edge-alb/  data/  registry/  observability/  compute/  media/      one state file each: prod2/<stack>/terraform.tfstate
   releases/<repo>.json   the pinned image digests gkoi-release records (compute reads them)
 ```
 
@@ -45,6 +46,7 @@ The state bucket, lock table, runner project and its role were created by hand i
 | `data` | RDS PostgreSQL 16 `gkoi-prod2-pg` (db.t4g.small, single-AZ, gp3 20→100 GiB, encrypted, 7-day backups, deletion protection, master password managed by RDS in Secrets Manager, parameter group `rds.force_ssl=1` + slow/lock/temp/autovacuum/connection logging, logs to CloudWatch 30 days); ElastiCache Valkey 8 `gkoi-prod2-valkey` (one cache.t4g.small, `maxmemory-policy noeviction`, TLS + at-rest encryption, auth token in `gkoi/prod2/valkey` with a `rediss://` URL, slow-log to CloudWatch); EFS `gkoi-prod2-cms` (encrypted, general purpose, elastic throughput, AWS Backup on, TLS-only policy) + the access point `/cms-content` at uid/gid 33; SGs: each store admits only the ECS tasks SG | network state |
 | `registry` | ECR `gkoi/{cms-server, cms-nginx, engine-api, engine-worker, engine-web, media-agent, media-origin, mediamtx, fm-api, fm-worker, fm-web, warroom-game}` (immutable tags, scan on push, keep last 20); registry replication of `gkoi/*` to euc1 + use1 with creation templates there; CodeBuild `gkoi-build-{aisolver-www, mikaido, filemanager}` (privileged, BUILD_GENERAL1_LARGE, S3 source `<repo>/source.zip`, local Docker layer cache), each with role `/gkoi/gkoi-build-<repo>` (read `<repo>/*`, read/write `cache/<repo>/*`, push its own repos, write `/gkoi/codebuild/<repo>`) | bucket `gkoi-build-sources-127214190346` |
 | `observability` | Log groups (30 days): `/gkoi/prod2/ecs/<service>`, `/gkoi/prod2/ops`, `/gkoi/prod2/{media,game}/<region>/{container,syslog,bootstrap}` per enabled region; dashboard `gkoi-prod2` (ALB, RDS, Valkey, EFS); alarms → `gkoi-ops-alerts` (usw2): RDS CPU / storage / memory / connections, Valkey memory / CPU, ALB 5xx, per-target-group unhealthy hosts, EFS IO limit | the `gkoi-ops-alerts` topics; network, edge-alb and data state |
+| `media` | Per enabled media region (usw2 default; euc1 / use1 by a map): an ASG of ONE EC2 media box (`m7i.xlarge`, Ubuntu 24.04, SSM only), its EIP, SGs (public RTMPS / ICE / CloudFront→443; the engine's private pool ports), role `/gkoi/gkoi-prod2-media-<key>`, `/gkoi/prod2/media/<key>/config`, rehearsal A records, alarms; once: the box bundle in the sources bucket, the INTERNAL ALB `gkoi-prod2-engine-internal` (the boxes' `/internal/**` path to the engine api), the Valkey rule for the usw2 box. README in `envs/prod2/media/` | network, data, observability state; the engine + origin-verify secrets (ARNs); `releases/mikaido.json`; zone `gkoi.com` |
 | `compute` | ECS cluster `gkoi-prod2` (Container Insights, FARGATE); services `cms`, `engine-api`, `engine-worker`, `fm-api`, `fm-worker`, `fm-web`; migrator task definitions `gkoi-prod2-{cms,engine,fm}-migrate`; 25 EMPTY secrets `gkoi/prod2/<app>/<NAME>`; execution roles `/gkoi/gkoi-prod2-exec-{cms,engine,fm}` + task roles `/gkoi/gkoi-prod2-task-*`; log group `/gkoi/prod2/ecs/engine-edge` | network, edge-alb, data, registry state; the existing `gkoi/edge/live-origin` secret (ARN only); the buckets `gkoi-beta-vods` / `gkoi-beta-files`; observability's log groups |
 
 **Service counts.** The services live in `compute`. `edge-alb`'s `services` variable carries each control-plane service's
@@ -68,6 +70,8 @@ before origin-live moves to the ALB in P3.
 4. `registry` (independent — any time)
 5. `observability` (reads network, edge-alb and data)
 6. `compute` (last: reads network, edge-alb, data and registry; writes into observability's log groups)
+7. `media` (P5: reads network, data, observability; then compute registers the api in its internal target group and
+   data's `valkey_peer_cidrs` takes its spoke CIDRs — `envs/prod2/media/README.md` "Apply order")
 
 Each stack: `plan`, read the summary, then `apply` (which re-plans and applies exactly that saved plan).
 

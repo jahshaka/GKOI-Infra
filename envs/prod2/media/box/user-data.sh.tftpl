@@ -1,0 +1,32 @@
+#!/bin/bash
+# GKOI media box user-data (rendered by envs/prod2/media; NO secrets here — only where the box's config lives).
+# Fetches the box bundle named by the config parameter, checks every file's sha256, then runs media-bootstrap.sh apply.
+# Everything after this point is idempotent and re-runnable by hand over SSM: /opt/gkoi-media/media-bootstrap.sh apply
+set -euo pipefail
+exec >>/var/log/gkoi-media-bootstrap.log 2>&1
+echo "== user-data $(date -u +%FT%TZ)"
+REGION='${region}'
+PARAM='${config_param}'
+TOOL=/opt/gkoi-media
+install -d -m 0755 "$TOOL" /etc/gkoi-media
+command -v aws >/dev/null 2>&1 || snap install aws-cli --classic
+PATH="/snap/bin:$PATH"
+for i in 1 2 3 4 5 6; do
+  aws ssm get-parameter --region "$REGION" --name "$PARAM" --query Parameter.Value --output text >/etc/gkoi-media/config.json.new && break
+  echo "config parameter not readable yet (attempt $i)"; sleep 10
+done
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' /etc/gkoi-media/config.json.new
+mv /etc/gkoi-media/config.json.new /etc/gkoi-media/config.json
+python3 - /etc/gkoi-media/config.json >/tmp/gkoi-media-bundle.list <<'PY'
+import json, sys
+b = json.load(open(sys.argv[1]))["bundle"]
+for f, sha in sorted(b["files"].items()):
+    print(b["bucket"], b["region"], b["prefix"] + f, f, sha)
+PY
+while read -r bucket bregion key file sha; do
+  aws s3 cp --only-show-errors --region "$bregion" "s3://$bucket/$key" "$TOOL/$file.new"
+  echo "$sha  $TOOL/$file.new" | sha256sum -c --quiet -
+  mv "$TOOL/$file.new" "$TOOL/$file"
+done </tmp/gkoi-media-bundle.list
+chmod 0755 "$TOOL"/*.sh
+exec "$TOOL/media-bootstrap.sh" apply
