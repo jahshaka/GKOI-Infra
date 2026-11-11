@@ -1,0 +1,18 @@
+{
+  "built_at": "2026-11-11T06:51:45Z",
+  "codebuild_build_id": "gkoi-build-aisolver-www:8d0d531d-aba9-4479-99df-09213841554c",
+  "commit": "91b3fdb7c33348679bb3104fc8b0ea84089d9d5e",
+  "images": {
+    "cms-nginx": {
+      "digest": "sha256:2af395988266a921c4040654e7beb2555c078d6c0265926d3e3512f44e785fe0",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/cms-nginx@sha256:2af395988266a921c4040654e7beb2555c078d6c0265926d3e3512f44e785fe0"
+    },
+    "cms-server": {
+      "digest": "sha256:c511b0f43ba580346142c24e7fd344d5968a1829d1721f09f56d28fdf4f56dc4",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/cms-server@sha256:c511b0f43ba580346142c24e7fd344d5968a1829d1721f09f56d28fdf4f56dc4"
+    }
+  },
+  "repo": "aisolver-www",
+  "source_sha256": "ffacb7e1ff152afb136488632d5f2d9c4e6e795b01d55eb33b9832a18f8a8614",
+  "tag": "gkoi-2026.11.11-1"
+}

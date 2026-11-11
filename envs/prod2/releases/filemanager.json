@@ -1,0 +1,22 @@
+{
+  "built_at": "2026-11-11T06:52:01Z",
+  "codebuild_build_id": "gkoi-build-filemanager:2ffe6b33-c3ff-44ed-abe4-c7427fc52eeb",
+  "commit": "fcf894291e084a230280b6ee267324cee4841304",
+  "images": {
+    "fm-api": {
+      "digest": "sha256:ca85ca37a0207f4510461548d605200ee09f23e0215e191ca57bef63a3694948",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-api@sha256:ca85ca37a0207f4510461548d605200ee09f23e0215e191ca57bef63a3694948"
+    },
+    "fm-web": {
+      "digest": "sha256:a58ada7a3fafb115c0b0ba8457f54883df5801a2cd1a55b4b7675d100b8ebb2b",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-web@sha256:a58ada7a3fafb115c0b0ba8457f54883df5801a2cd1a55b4b7675d100b8ebb2b"
+    },
+    "fm-worker": {
+      "digest": "sha256:eb8f4924131d227f37075e1d5776a47e081f8455c7332f975aee76efae11525a",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-worker@sha256:eb8f4924131d227f37075e1d5776a47e081f8455c7332f975aee76efae11525a"
+    }
+  },
+  "repo": "filemanager",
+  "source_sha256": "da1c91c556e85ac9234a6ffac8726faa80ed2a475e8f7afa05ffb8dcb844bca8",
+  "tag": "gkoi-2026.11.11-1"
+}
