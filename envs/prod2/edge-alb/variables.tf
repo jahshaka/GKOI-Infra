@@ -58,7 +58,7 @@ variable "services" {
     cms = {
       port         = 8080 # the CMS container nginx (NGINX_LISTEN 8080), which proxies the server
       health_path  = "/api/v1/healthz"
-      hosts        = ["origin-www", "origin-cdn", "origin-labs"]
+      hosts        = ["origin-www", "origin-cdn", "origin-labs", "www"] # www: CloudFront www.gkoi.com forwards the viewer's Host (B4-2)
       min_capacity = 1
       max_capacity = 1
     }
@@ -99,4 +99,60 @@ variable "live_origin_host" {
 variable "live_origin_path" {
   type    = string
   default = "/api/v1/watch/*"
+}
+
+# --- audit 2026-11-11: the cms hosts (B4-2/3/4) and the files allow-list (B3-6) ---------------------------------
+
+variable "cms_source_cidrs" {
+  description = <<-EOT
+    The CMS's source addresses as the ALB sees them: the Lightsail site box (52.24.67.48, until P4) and the home NAT
+    (32.189.104.202 — after P4 the CMS on ECS, like every ECS task, leaves by it). files.gkoi.com serves its non-public
+    paths only to these. compute's variable of the same name feeds the engine edge's EDGE_ALLOW_CIDR(_2) and the api's
+    TRUSTED_PROXIES — keep the two equal. 1–2 IPv4 CIDRs (the engine edge takes two).
+  EOT
+  type        = list(string)
+  default     = ["52.24.67.48/32", "32.189.104.202/32"]
+  validation {
+    condition = (
+      length(var.cms_source_cidrs) >= 1 && length(var.cms_source_cidrs) <= 2 &&
+      alltrue([for c in var.cms_source_cidrs : can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/([89]|[12][0-9]|3[0-2])$", c)) && can(cidrhost(c, 0))])
+    )
+    error_message = "cms_source_cidrs: 1–2 IPv4 CIDRs, prefix /8–/32."
+  }
+}
+
+variable "cms_cdn_origin_host" {
+  description = "The cdn.gkoi.com distribution's origin label (one of services.cms.hosts): only cms_cdn_paths, GET/HEAD."
+  type        = string
+  default     = "origin-cdn"
+}
+
+variable "cms_cdn_paths" {
+  description = "What origin-cdn serves (prod's host nginx: ^~ /content/ and ^~ /assets/). At most 2."
+  type        = list(string)
+  default     = ["/content/*", "/assets/*"]
+}
+
+variable "cms_labs_origin_host" {
+  description = "The labs.gkoi.com distribution's origin label (one of services.cms.hosts): /content/labs/** GET/HEAD; other GET/HEAD → 302 to the site's /labs."
+  type        = string
+  default     = "origin-labs"
+}
+
+variable "cms_site_host" {
+  description = "The site's canonical label (www): where the apex and the labs host's other paths redirect."
+  type        = string
+  default     = "www"
+}
+
+variable "apex_redirect" {
+  description = "true: the certificate also names the apex (zone_name) and a rule 301s it to cms_site_host (prod's apex server block)."
+  type        = bool
+  default     = true
+}
+
+variable "fm_public_paths" {
+  description = "files.gkoi.com paths open to everyone (prod's public file-manager listener). Every other path: cms_source_cidrs only, else 404."
+  type        = list(string)
+  default     = ["/api/v1/app/*", "/thumbs/*", "/api/v1/healthz", "/api/v1/readyz"]
 }
