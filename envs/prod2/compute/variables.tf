@@ -332,3 +332,9 @@ variable "content_sync_host_key" {
   type        = string
   default     = "52.24.67.48 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL9XanMB8BekTf1He1rSTstBKMuyU0kVXZtyacMMhvlX"
 }
+
+variable "parked" {
+  description = "true = every service at 0 tasks (min = max = 0). The rehearsal state: the services share the LIVE buckets and call the live hosts, so they run only inside a switch-over window. Set false in the window's apply."
+  type        = bool
+  default     = true
+}
