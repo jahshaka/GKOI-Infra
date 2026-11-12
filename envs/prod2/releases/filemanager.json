@@ -1,22 +1,22 @@
 {
-  "built_at": "2026-11-11T06:52:01Z",
-  "codebuild_build_id": "gkoi-build-filemanager:2ffe6b33-c3ff-44ed-abe4-c7427fc52eeb",
-  "commit": "fcf894291e084a230280b6ee267324cee4841304",
+  "built_at": "2026-11-12T06:21:56Z",
+  "codebuild_build_id": "gkoi-build-filemanager:89b7b8f8-43ac-4743-a7cf-7c216cdd0b42",
+  "commit": "a8d7ac6d8c5ce9ccbc9ae621f9caff039989346a",
   "images": {
     "fm-api": {
-      "digest": "sha256:ca85ca37a0207f4510461548d605200ee09f23e0215e191ca57bef63a3694948",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-api@sha256:ca85ca37a0207f4510461548d605200ee09f23e0215e191ca57bef63a3694948"
+      "digest": "sha256:e7feecfa99fc6dc942f53784bd61a41e5cc17a9c6ac52d7f3dff34f23f07b5a8",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-api@sha256:e7feecfa99fc6dc942f53784bd61a41e5cc17a9c6ac52d7f3dff34f23f07b5a8"
     },
     "fm-web": {
-      "digest": "sha256:a58ada7a3fafb115c0b0ba8457f54883df5801a2cd1a55b4b7675d100b8ebb2b",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-web@sha256:a58ada7a3fafb115c0b0ba8457f54883df5801a2cd1a55b4b7675d100b8ebb2b"
+      "digest": "sha256:26a05e6faa105acb9a30eb2a207d03546c13998ddb9d9af87bf962c963066cde",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-web@sha256:26a05e6faa105acb9a30eb2a207d03546c13998ddb9d9af87bf962c963066cde"
     },
     "fm-worker": {
-      "digest": "sha256:eb8f4924131d227f37075e1d5776a47e081f8455c7332f975aee76efae11525a",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-worker@sha256:eb8f4924131d227f37075e1d5776a47e081f8455c7332f975aee76efae11525a"
+      "digest": "sha256:9984bac0241661ea9b2f8306cd5d653107860f1f32b1330b3b5153fecf05f5b4",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/fm-worker@sha256:9984bac0241661ea9b2f8306cd5d653107860f1f32b1330b3b5153fecf05f5b4"
     }
   },
   "repo": "filemanager",
-  "source_sha256": "da1c91c556e85ac9234a6ffac8726faa80ed2a475e8f7afa05ffb8dcb844bca8",
-  "tag": "gkoi-2026.11.11-1"
+  "source_sha256": "abb4da470bc7dfda7e782bad55d1a94c36e8813c1551d177abc49f4692de2ec1",
+  "tag": "gkoi-2026.11.12-1"
 }
