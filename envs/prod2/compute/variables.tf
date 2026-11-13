@@ -142,6 +142,7 @@ variable "secrets" {
       "AUTH_ENCRYPTION_KEY",
       "APP_API_SECRET",
       "LABS_SUB_KEY",
+      "APP_UPDATES_SECRET", # seals the app-update signing keys (SPEC-CMS-APP-UPDATER-V2 U4) — filled before the task that reads it
       "COMMERCE_PAYOUT_KEY",
       "RATE_LIMIT_REDIS_URL",
       "SMTP_PASS",
