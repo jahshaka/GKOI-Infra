@@ -203,8 +203,7 @@ run "default_four_regions" {
 run "tokyo_without_snap_free_tool" {
   command = plan
   variables {
-    warroom_tool_override  = null
-    release_tool_snap_free = false
+    warroom_tool_override = null
   }
   expect_failures = [terraform_data.preflight]
 }
@@ -213,7 +212,6 @@ run "tokyo_override_scoped_elsewhere" {
   command = plan
   variables {
     warroom_tool_override_regions = ["use1"]
-    release_tool_snap_free        = false
   }
   expect_failures = [terraform_data.preflight]
 }
