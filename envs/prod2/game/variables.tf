@@ -146,11 +146,9 @@ variable "warroom_tool_override" {
     sha256 = string
     commit = string
   })
-  default = {
-    s3_key = "warroom-game/tool/408a3107a740dd851cd5a05b96f9193dc0adad00.zip"
-    sha256 = "8f927119015d72314c567e7911127b3fbeb7c2a471c7c8bef716bbfd974275f6"
-    commit = "408a3107a740dd851cd5a05b96f9193dc0adad00"
-  }
+  # null since the release 1.0.16.3-h8 (GKOIBuilder_AI 29ab732): its own tool carries the snap-free bootstrap (408a310),
+  # so Tokyo no longer needs the tool-only zip warroom-game/tool/408a3107….zip (sha256 8f927119…).
+  default = null
   validation {
     condition     = var.warroom_tool_override == null || can(regex("^warroom-game/", var.warroom_tool_override.s3_key))
     error_message = "The tool zip lives under warroom-game/ in the bundle bucket (the box role reads only there)."
@@ -160,7 +158,7 @@ variable "warroom_tool_override" {
 variable "warroom_tool_override_regions" {
   description = "The regions warroom_tool_override applies to (null = every enabled region). The others keep the release's own tool zip — and an unchanged config parameter."
   type        = list(string)
-  default     = ["apne1"]
+  default     = null
 }
 
 variable "no_snap_store_regions" {
@@ -177,7 +175,7 @@ variable "no_snap_store_regions" {
 variable "release_tool_snap_free" {
   description = "true = the release's own ops/warroom-game (source.zip) already has the certbot/SSM fallbacks (no snap store needed)."
   type        = bool
-  default     = false
+  default     = true # 1.0.16.3-h8 was cut from 29ab732, which has the fallback (408a310)
 }
 
 variable "match_server_key_secret" {
