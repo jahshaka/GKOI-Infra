@@ -252,6 +252,9 @@ lineages) is a TOOL change, not an image change, so it reaches the box through `
 `default_four_regions`). The plan STOPS (`no_snap_store_regions`, default `["apne1"]`) while Tokyo would get a tool that
 needs the snap. Once a War Room release is cut from a GKOIBuilder_AI commit that carries the fallback, set
 `release_tool_snap_free = true` and drop the override.
+**DONE with 1.0.16.3-h8 (2026-11-16):** the release was cut from GKOIBuilder_AI 29ab732 (has 408a310), so the defaults are
+`warroom_tool_override = null`, `warroom_tool_override_regions = null`, `release_tool_snap_free = true`: all four boxes
+run the release's own tool zip.
 
 The tool zip, by hand (the orchestrator; the commit must be the fallback's, on main):
 ```
