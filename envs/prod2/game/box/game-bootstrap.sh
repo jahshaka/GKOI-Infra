@@ -398,6 +398,32 @@ phase_secrets() {
     *) rm -f "$tmp"; die "secrets: cannot read the match-server key" ;;
   esac
   val=""
+  # the results key (the War Room's, results:write only) — matchd's results.key_file. Wanted only when this box's
+  # matchd.json has a `results` block (matchd 0.8.1+): with the block and no key file matchd STOPS at start, so a
+  # missing value keeps the stack waiting (as for the match-server key). A file installed by hand before the secret
+  # had a value is kept. It must never be the match-server key (matchd compares the contents and refuses).
+  arn="$(cfg_or .secrets.results_key '')"
+  if jq -e '.results != null' "$(env_get WARROOM_CONFIG_DIR)/matchd.json" >/dev/null 2>&1; then
+    [ "$(jq -r '.results.key_file' "$(env_get WARROOM_CONFIG_DIR)/matchd.json")" = /run/secrets/warroom/results-key.txt ] \
+      || { rm -f "$tmp"; die "secrets: matchd.json results.key_file is not /run/secrets/warroom/results-key.txt"; }
+    rc=3; [ -z "$arn" ] || { rc=0; val="$(secret_value "$arn")" || rc=$?; }
+    case $rc in
+      0) case "$val" in *$'\n'*|*' '*) rm -f "$tmp"; die "secrets: the results key holds whitespace — refused (the value is not printed)" ;; esac
+         printf '%s' "$val" > "$tmp"
+         if [ -s "$dir/match-server-key.txt" ] && cmp -s "$tmp" "$dir/match-server-key.txt"; then
+           rm -f "$tmp"; die "secrets: the results key IS the match-server key — refused (matchd refuses it too)"
+         fi
+         install_secret_file "$tmp" results-key.txt || true ;;
+      3) if [ -s "$dir/results-key.txt" ]; then
+           warn "secrets: results-key.txt is on the box but its secret has no value — kept (a replacement box would wait: put the value)"
+         else
+           if [ -n "$arn" ]; then missing+=("results key (matchd.json has a results block; no value in ${arn##*:secret:})")
+           else missing+=("results key (matchd.json has a results block; the box config names no .secrets.results_key)"); fi
+         fi ;;
+      *) rm -f "$tmp"; die "secrets: cannot read the results key" ;;
+    esac
+  fi
+  val=""
   # the gateway-ticket key: from its secret when the region names one, else this box's own (generated once)
   arn="$(cfg_or .secrets.ticket_key '')"
   if [ -n "$arn" ]; then
@@ -445,7 +471,7 @@ phase_image() {
 # =====================================================================================================================
 fingerprint() { # the inputs matchd reads at start (TLS excluded: the tool's own cert hook restarts for a renewal)
   local dir; dir="$(env_get WARROOM_SECRETS_DIR)"
-  cat "$BOX_ENV" "$(env_get WARROOM_CONFIG_DIR)/matchd.json" "$dir/match-server-key.txt" "$dir/ticket.p8" 2>/dev/null \
+  cat "$BOX_ENV" "$(env_get WARROOM_CONFIG_DIR)/matchd.json" "$dir/match-server-key.txt" "$dir/ticket.p8" "$dir/results-key.txt" 2>/dev/null \
     | sha256sum | cut -d' ' -f1
 }
 start_timer() { # on|off — gkoi-game-start.timer: retry secrets,image,stack every 5 min while secrets are missing

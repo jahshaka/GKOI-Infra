@@ -325,7 +325,7 @@ run "apply_tokyo_values" {
     error_message = "config size ${length(jsonencode(local.config.apne1))}"
   }
   assert {
-    condition     = length(local.secret_arns.apne1) == 1 && local.config.apne1.secrets.ticket_key == null
+    condition     = length(local.secret_arns.apne1) == 2 && local.config.apne1.secrets.results_key != null && local.config.apne1.secrets.ticket_key == null
     error_message = "match-server key only; the ticket key generated on the box"
   }
 }
