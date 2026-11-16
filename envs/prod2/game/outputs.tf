@@ -36,3 +36,8 @@ output "match_server_key_secret_arn" {
 output "bundle" {
   value = "s3://${var.bundle_bucket}/${local.bundle_prefix}"
 }
+
+output "results_key_secret_arn" {
+  description = "Put the prod results key here (README: Secrets): gkoi-aws secretsmanager put-secret-value --secret-id <this> --secret-string file://key.txt"
+  value       = local.results_key_arn
+}

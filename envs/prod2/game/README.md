@@ -59,7 +59,13 @@ Once (us-west-2): the secret `gkoi/prod2/game/match-server-key` (EMPTY: no value
   not region-bound in the CMS — `plays` carry the match server's body `region`). `ticket.p8` is generated ONCE on the box
   (Ed25519, PKCS#8 **v2** DER, 83 bytes — matchd refuses v1; construction proven offline with OpenSSL 3.5): matchd signs
   and the gateway verifies with the same file on the same box, nothing else holds it, so a replacement box simply makes
-  its own. `ticket_key_secret` per region pins one in Secrets Manager instead (base64 of the DER) if ever wanted. A box
+  its own. **`results-key.txt`** (matchd 0.8.1+, the fight-results sink) from `gkoi/prod2/game/results-key` (one secret for
+  every region; `results:write` ONLY, never the match-server key — matchd compares the contents). It is wanted only when the
+  box's matchd.json has a `results` block: with the block and no key file matchd STOPS at start, so a box without a value
+  waits (`secrets.pending`, the start timer) instead of crash-looping; a file installed by hand earlier is kept until the
+  secret has a value. Put it like the match-server key:
+  `gkoi-aws secretsmanager put-secret-value --region us-west-2 --secret-id gkoi/prod2/game/results-key --secret-string file://key.txt`
+  (no trailing newline), then `roll.sh` on each box. `ticket_key_secret` per region pins one in Secrets Manager instead (base64 of the DER) if ever wanted. A box
   whose secret has no value yet does everything else, then `gkoi-game-start.timer` retries `secrets,image,stack` every
   5 min until the stack is up.
 - **The IMDS guard:** the game container uses host networking, so the IMDS hop limit does not keep it from the instance

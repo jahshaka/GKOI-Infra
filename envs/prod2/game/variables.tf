@@ -178,6 +178,12 @@ variable "release_tool_snap_free" {
   default     = true # 1.0.16.3-h8 was cut from 29ab732, which has the fallback (408a310)
 }
 
+variable "results_key_secret" {
+  description = "Secrets Manager name (us-west-2) of the prod RESULTS key (gk_…, results:write only; matchd's results.key_file), created EMPTY here."
+  type        = string
+  default     = "gkoi/prod2/game/results-key"
+}
+
 variable "match_server_key_secret" {
   description = "Secrets Manager name (us-west-2) of OUR prod match-server key (gk_…, invites:read + plays:write), created EMPTY here."
   type        = string

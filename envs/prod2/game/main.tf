@@ -117,6 +117,7 @@ locals {
       secrets_region = "us-west-2"
       secrets = {
         match_server_key = local.match_server_key_arn
+        results_key      = local.results_key_arn
         ticket_key       = local.ticket_secret_arn[k]
       }
       cw                = { namespace = var.cw_namespace, log_prefix = "/gkoi/prod2/game/${k}", metrics_log_group = "/gkoi/prod2/game/${k}/metrics" }
@@ -133,7 +134,7 @@ locals {
 
   live_records = { for k, v in local.enabled : k => v.manage_live_records ? local.names[k].live : [] }
   acme_names   = { for k, v in local.enabled : k => distinct(concat(local.names[k].rehearsal, local.names[k].live)) }
-  secret_arns  = { for k, v in local.enabled : k => compact([local.match_server_key_arn, local.ticket_secret_arn[k]]) }
+  secret_arns  = { for k, v in local.enabled : k => compact([local.match_server_key_arn, local.results_key_arn, local.ticket_secret_arn[k]]) }
 
   bundle_object_arns = [
     "arn:aws:s3:::${var.bundle_bucket}/${var.bundle_prefix}/*",
@@ -142,6 +143,7 @@ locals {
   ]
 
   match_server_key_arn = aws_secretsmanager_secret.match_server_key.arn
+  results_key_arn      = aws_secretsmanager_secret.results_key.arn
 }
 
 # The plan stops here, naming what is missing, before anything is created.
@@ -209,6 +211,14 @@ data "aws_ecr_image" "game_apne1" {
 resource "aws_secretsmanager_secret" "match_server_key" {
   name                    = var.match_server_key_secret
   description             = "GKOI prod2 game boxes: our match-server key (gk_..., invites:read + plays:write) as matchd key_file text"
+  recovery_window_in_days = 7
+}
+
+# matchd 0.8.1+ (War Room 1.0.16.x): the fight-results sink. A matchd.json with a `results` block STOPS matchd at start
+# when its key file is missing, so a box whose config has the block waits for this value like for the match-server key.
+resource "aws_secretsmanager_secret" "results_key" {
+  name                    = var.results_key_secret
+  description             = "GKOI prod2 game boxes: the War Room results key (gk_..., results:write ONLY, never the match-server key) as matchd results.key_file text"
   recovery_window_in_days = 7
 }
 
