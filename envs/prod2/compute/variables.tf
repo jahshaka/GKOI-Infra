@@ -74,16 +74,15 @@ variable "sizes" {
     memory = number
   }))
   default = {
-    cms              = { cpu = 1024, memory = 2048 }
-    engine-api       = { cpu = 1024, memory = 2048 }
-    engine-worker    = { cpu = 1024, memory = 2048 }
-    fm-api           = { cpu = 512, memory = 1024 }
-    fm-worker        = { cpu = 512, memory = 2048 } # compose: mem_limit 1536m
-    fm-web           = { cpu = 256, memory = 512 }
-    cms-migrate      = { cpu = 512, memory = 1024 }
-    cms-content-sync = { cpu = 1024, memory = 2048 }
-    engine-migrate   = { cpu = 512, memory = 1024 }
-    fm-migrate       = { cpu = 256, memory = 512 }
+    cms            = { cpu = 1024, memory = 2048 }
+    engine-api     = { cpu = 1024, memory = 2048 }
+    engine-worker  = { cpu = 1024, memory = 2048 }
+    fm-api         = { cpu = 512, memory = 1024 }
+    fm-worker      = { cpu = 512, memory = 2048 } # compose: mem_limit 1536m
+    fm-web         = { cpu = 256, memory = 512 }
+    cms-migrate    = { cpu = 512, memory = 1024 }
+    engine-migrate = { cpu = 512, memory = 1024 }
+    fm-migrate     = { cpu = 256, memory = 512 }
   }
 }
 
@@ -146,7 +145,6 @@ variable "secrets" {
       "COMMERCE_PAYOUT_KEY",
       "RATE_LIMIT_REDIS_URL",
       "SMTP_PASS",
-      "CONTENT_SYNC_SSH_KEY",
     ]
     engine = [
       "POSTGRES_APP_PASSWORD",
@@ -317,24 +315,6 @@ variable "fm_assets_bucket" {
   default     = "gkoi-beta-files"
 }
 
-variable "content_sync_image" {
-  description = "The content-sync task's image (public, no ECR auth needed)."
-  type        = string
-  default     = "public.ecr.aws/docker/library/alpine:3.20"
-}
-
-variable "content_sync_host" {
-  description = "The Lightsail site box (the CMS content's source); temporary, until Lightsail is retired."
-  type        = string
-  default     = "52.24.67.48"
-}
-
-variable "content_sync_host_key" {
-  description = "The site box's SSH host key line (known_hosts format); public."
-  type        = string
-  default     = "52.24.67.48 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL9XanMB8BekTf1He1rSTstBKMuyU0kVXZtyacMMhvlX"
-}
-
 variable "parked_services" {
   description = <<-EOT
     The services held at 0 tasks (min = max = 0). Default: ALL of them (the state since 2026-11-11 — the services share
@@ -366,10 +346,11 @@ variable "rehearsal" {
 
 variable "cms_source_cidrs" {
   description = <<-EOT
-    The CMS's source addresses as engine.gkoi.com / files.gkoi.com see them (audit 2026-11-11 B3-5): the Lightsail site
-    box (52.24.67.48, until P4) and the home NAT (32.189.104.202 — after P4 the CMS on ECS leaves by it; so does every
-    other ECS task). The engine edge's EDGE_ALLOW_CIDR / _2 and the api's TRUSTED_PROXIES. edge-alb has the same
-    variable (the files allow-list) — keep the two equal. 1–2 IPv4 CIDRs (the edge template takes two).
+    The CMS's source addresses as engine.gkoi.com / files.gkoi.com see them (audit 2026-11-11 B3-5): the home NAT
+    (32.189.104.202 — the CMS on ECS leaves by it; so does every other ECS task). The engine edge's EDGE_ALLOW_CIDR / _2
+    and the api's TRUSTED_PROXIES. edge-alb has the same variable (the files allow-list) — keep the two equal. 1–2 IPv4
+    CIDRs (the edge template takes two). History: until the P4 window (2026-11-11) the list also held the Lightsail site
+    box, 52.24.67.48 — that server was retired on 2026-11-17 and its address released: never add it back.
   EOT
   type        = list(string)
   default     = ["32.189.104.202/32"]

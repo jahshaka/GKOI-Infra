@@ -45,12 +45,12 @@ The state bucket, lock table, runner project and its role were created by hand i
 | Stack | Creates | Reads (never changes) |
 |---|---|---|
 | `network` | A VPC per enabled region (usw2 10.10/16, euc1 10.20/16, use1 10.30/16, apne1 10.40/16), 2 AZs, public + private /20s, IGW; ONE NAT gateway in usw2 (`home_nat_mode = per_az` for one per AZ); S3 gateway endpoint everywhere; interface endpoints in usw2 (ecr.api, ecr.dkr, secretsmanager, logs, ssm, ssmmessages, ec2messages, kms, sts); peering usw2 ↔ each spoke with routes in every route table; flow logs (ALL, 10-min aggregation) to `/gkoi/prod2/vpc-flow/<region>` (7 days) + the role `/gkoi/gkoi-prod2-vpc-flow-logs`; each VPC's default SG locked; the shared `gkoi-prod2-ecs-tasks` SG | — |
-| `edge-alb` | The public ALB `gkoi-prod2-alb` (usw2, 2 AZs, deletion protection on); an ACM cert for engine / files / origin-www / origin-cdn / origin-labs / origin-live `.gkoi.com` with its DNS-validation CNAMEs; HTTP→HTTPS 301; HTTPS default 404; host rules → target groups `cms` (origin-www/cdn/labs + www; the apex 301s to www), `engine-api` (engine), `fm-api` (files: public paths for all, the rest from `cms_source_cidrs` only), `fm-web` (no host: the FM admin is reached through the site's admin mount); the origin-live lock (below); ALB↔tasks SG rules; the INTERNAL ALB `gkoi-prod2-engine-internal` (:3000, `/internal/*` + health → target group `gkoi-prod2-engine-api-int`; from every peered edge VPC — the media boxes' path to the engine api, output `engine_internal`) | Route 53 zone `gkoi.com`; secret `gkoi/edge/live-origin`; network state |
+| `edge-alb` | The public ALB `gkoi-prod2-alb` (usw2, 2 AZs, deletion protection on); an ACM cert for engine / files / origin-www / origin-cdn / origin-labs / origin-live `.gkoi.com` with its DNS-validation CNAMEs; HTTP→HTTPS 301; HTTPS default 404; host rules → target groups `cms` (origin-www/cdn/labs + www — behind the site-origin lock, below; the apex 301s to www), `engine-api` (engine), `fm-api` (files: public paths for all, the rest from `cms_source_cidrs` only), `fm-web` (no host: the FM admin is reached through the site's admin mount); the origin-live lock (below); ALB↔tasks SG rules; the INTERNAL ALB `gkoi-prod2-engine-internal` (:3000, `/internal/*` + health → target group `gkoi-prod2-engine-api-int`; from every peered edge VPC — the media boxes' path to the engine api, output `engine_internal`) | Route 53 zone `gkoi.com`; secret `gkoi/edge/live-origin`; network state. Creates the EMPTY secret `gkoi/prod2/edge/site-origin` |
 | `data` | RDS PostgreSQL 16 `gkoi-prod2-pg` (db.t4g.small, single-AZ, gp3 20→100 GiB, encrypted, 7-day backups, deletion protection, master password managed by RDS in Secrets Manager, parameter group `rds.force_ssl=1` + slow/lock/temp/autovacuum/connection logging, logs to CloudWatch 30 days); ElastiCache Valkey 8 `gkoi-prod2-valkey` (one cache.t4g.small, `maxmemory-policy noeviction`, TLS + at-rest encryption, auth token in `gkoi/prod2/valkey` with a `rediss://` URL, slow-log to CloudWatch); EFS `gkoi-prod2-cms` (encrypted, general purpose, elastic throughput, AWS Backup on, TLS-only policy) + the access point `/cms-content` at uid/gid 33; SGs: each store admits only the ECS tasks SG; the rehearsal's scratch recordings bucket `gkoi-prod2-rehearsal-vods-127214190346` (private, 3-day expiry) | network state |
 | `registry` | ECR `gkoi/{cms-server, cms-nginx, engine-api, engine-worker, engine-web, media-agent, media-origin, mediamtx, fm-api, fm-worker, fm-web, warroom-game}` (immutable tags, scan on push, keep last 20); registry replication of `gkoi/*` to euc1 + use1 with creation templates there; CodeBuild `gkoi-build-{aisolver-www, mikaido, filemanager}` (privileged, BUILD_GENERAL1_LARGE, S3 source `<repo>/source.zip`, local Docker layer cache), each with role `/gkoi/gkoi-build-<repo>` (read `<repo>/*`, read/write `cache/<repo>/*`, push its own repos, write `/gkoi/codebuild/<repo>`) | bucket `gkoi-build-sources-127214190346` |
 | `observability` | Log groups (30 days): `/gkoi/prod2/ecs/<service>`, `/gkoi/prod2/ops`, `/gkoi/prod2/{media,game}/<region>/{container,syslog,bootstrap}` per enabled region; dashboard `gkoi-prod2` (ALB, RDS, Valkey, EFS); alarms → `gkoi-ops-alerts` (usw2): RDS CPU / storage / memory / connections, Valkey memory / CPU, ALB 5xx, per-target-group unhealthy hosts, EFS IO limit | the `gkoi-ops-alerts` topics; network, edge-alb and data state |
 | `media` | Per enabled media region (usw2, euc1, use1, apne1 — all four by default; a map turns one off): an ASG of ONE EC2 media box (`m7i.xlarge`, Ubuntu 24.04, SSM only), its EIP, SGs (public RTMPS / ICE / CloudFront→443; the engine's private pool ports), role `/gkoi/gkoi-prod2-media-<key>`, `/gkoi/prod2/media/<key>/config`, rehearsal A records, alarms; once: the box bundle in the sources bucket, the usw2 box's rules on Valkey + the internal ALB. README in `envs/prod2/media/` | network, edge-alb (`engine_internal`), data, observability state; `gkoi/ci-nginx` in each region's ECR; the engine + origin-verify secrets (ARNs); `releases/mikaido.json`; zone `gkoi.com` |
-| `compute` | ECS cluster `gkoi-prod2` (Container Insights, FARGATE); services `cms`, `engine-api`, `engine-worker`, `fm-api`, `fm-worker`, `fm-web` (each held at 0 while in `parked_services` — default all; `rehearsal = true` points the engine at the scratch bucket only); migrator task definitions `gkoi-prod2-{cms,engine,fm}-migrate`; 25 EMPTY secrets `gkoi/prod2/<app>/<NAME>`; execution roles `/gkoi/gkoi-prod2-exec-{cms,engine,fm}` + task roles `/gkoi/gkoi-prod2-task-*`; log group `/gkoi/prod2/ecs/engine-edge` | network, edge-alb, data, registry state; the existing `gkoi/edge/live-origin` secret (ARN only); the buckets `gkoi-beta-vods` / `gkoi-beta-files`; observability's log groups |
+| `compute` | ECS cluster `gkoi-prod2` (Container Insights, FARGATE); services `cms`, `engine-api`, `engine-worker`, `fm-api`, `fm-worker`, `fm-web` (each held at 0 while in `parked_services` — default all; `rehearsal = true` points the engine at the scratch bucket only); migrator task definitions `gkoi-prod2-{cms,engine,fm}-migrate` (the migration-time `gkoi-prod2-cms-content-sync` task and its secret `cms/CONTENT_SYNC_SSH_KEY` were removed on 2026-11-17 with the Lightsail site box); 25 EMPTY secrets `gkoi/prod2/<app>/<NAME>`; execution roles `/gkoi/gkoi-prod2-exec-{cms,engine,fm}` + task roles `/gkoi/gkoi-prod2-task-*`; log group `/gkoi/prod2/ecs/engine-edge` | network, edge-alb, data, registry state; the existing `gkoi/edge/live-origin` secret (ARN only); the buckets `gkoi-beta-vods` / `gkoi-beta-files`; observability's log groups |
 | `game` | Per enabled game region (usw2, euc1, use1 on; apne1 defined + off — its VPC exists for the Tokyo media box): an ASG of ONE War Room game box (`t3a.xlarge` standard credits = the live boxes, Ubuntu 24.04, SSM only) running GKOIBuilder_AI's `ops/warroom-game` from the release's own source.zip, its EIP, SG (tcp 9443, tcp + udp 8443), role `/gkoi/gkoi-prod2-game-<key>`, `/gkoi/prod2/game/<key>/config`, rehearsal A records `game-/gw-<key>-p2` (the live names behind `manage_live_records`), alarms; once: the EMPTY secret `gkoi/prod2/game/match-server-key`, the box bundle. README in `envs/prod2/game/` | network, observability state; `releases/warroom-game.json` (gkoi-release warroom-game); `gkoi/warroom-game` in each region's ECR; zone `gkoi.com` |
 | `rehearsal` | The private go-live rehearsal driver: task definition `gkoi-prod2-rehearsal-driver` (Node 22 Alpine from ECR Public + ffmpeg; the driver inlined), roles `/gkoi/gkoi-prod2-{exec,task}-rehearsal-driver`, log group `/gkoi/prod2/ecs/rehearsal-driver`, SSM `/gkoi/prod2/rehearsal/run-config`. README in `envs/prod2/rehearsal/` | network, edge-alb, data, compute and media state; the gateway + origin-verify secrets (ARNs) |
 | `ops` | The orchestrator's SQL path to RDS (`prod-psql.sh` in GKOIBuilder_AI `scripts/session-tools/`): task definitions `gkoi-prod2-ops-psql-{cms,engine,fm}` (psql as the APP role, one transaction, read only unless asked, the result framed in its log), execution role `/gkoi/gkoi-prod2-exec-ops-psql` (no task role), log group `/gkoi/prod2/ecs/ops-psql` (1 day), SSM `/gkoi/prod2/ops/psql-run-config`. The caller needs `iam/gkoi-orchestrator-ops.json`. README in `envs/prod2/ops/` | data, compute, registry state; `gkoi/ci-postgres` |
@@ -67,6 +67,81 @@ path/method → 404; 13 = no or wrong secret → 403. A plan-time precondition r
 (the nginx did): rewrite `X-Forwarded-For` from `CloudFront-Viewer-Address`, strip `Cookie` / `Authorization` /
 `X-Origin-Verify`, validate the LL-HLS query string, answer OPTIONS itself. Those need the api (or an nginx in the engine task)
 before origin-live moves to the ALB in P3.
+
+**The site-origin lock (edge-alb; audit 2026-11-17).** `www` / `cdn` / `labs.gkoi.com` are CloudFront distributions
+(hand-managed, not in Terraform) whose origins `origin-www` / `origin-cdn` / `origin-labs.gkoi.com` are this ALB. The ALB
+is open to the internet on purpose — `engine.gkoi.com`, `files.gkoi.com` and the apex `gkoi.com` are reached DIRECTLY
+(the apps, the game and media boxes, the ECS tasks through the NAT; each has its own gate: the engine edge's
+allow-list, the files allow-list, a redirect) — so a security-group restriction to CloudFront's prefix list would cut
+those off (they would need a second ALB). The lock is therefore the origin-live one, per host: with
+`site_origin_lock = true` every rule that forwards a cms host also demands `X-Origin-Verify` = the secret
+`gkoi/prod2/edge/site-origin` (created EMPTY by this stack, filled by `tools/gkoi-origin-header`), which each
+distribution adds as an origin custom header; everything else on those hosts is a fixed 403.
+
+| Priority | Host | Also | Action |
+|---|---|---|---|
+| 196–199 | origin-cdn | secret + one of `/content/*` `/assets/*` + GET or HEAD | → cms |
+| 200 / 201 | origin-cdn | those paths: secret + another method / no secret | 403 |
+| 202 / 203 | origin-cdn | another path with the secret / everything else | 404 / 403 |
+| 208–209 | origin-labs | secret + `/content/labs/*` + GET or HEAD | → cms |
+| 210 | origin-labs | secret + that path, another method | 403 |
+| 211 / 212 | origin-labs | secret + GET/HEAD / everything else | 302 → www/labs / 403 |
+| 220 | gkoi.com | — (direct, by design) | 301 → www |
+| 228 | origin-www | `cms_origin_open_paths` (`/api/v1/downloads/*`, `/api/v1/app-updates/*`), NO secret | → cms |
+| 230 / 231 | www, origin-www | secret / everything else | → cms / 403 |
+
+- **Which Host CloudFront sends:** www's default behaviour forwards the viewer's Host (`www.gkoi.com`, the managed
+  AllViewerAndCloudFrontHeaders policy); its `/assets/*` `/content/*` `/favicon*` `/apple-touch-icon*` behaviours, cdn
+  and labs send the origin's own name. Both names are locked: `www.gkoi.com` resolves to CloudFront, but anyone can send
+  that Host to the ALB's address.
+- **The open door (228).** The publish CLIs (`aisolver-www/scripts/downloads/publish.mjs`, `scripts/updater/submit.mjs`)
+  upload installers of up to 4 GiB to `https://origin-www.gkoi.com/api/v1/downloads/<app>/<platform>` — not through
+  CloudFront, on purpose (SPEC-PAGE-SPEED-V1) — from OTHER boxes (the Mac, the Windows VM), and read their submission at
+  `/api/v1/app-updates/**` with the same `--site`. Those boxes must not hold the origin secret, and every route there
+  checks its own publisher key, so these two prefixes stay open on `origin-www` only (never on `www`). Whoever calls
+  them directly can still hand-write `CloudFront-Viewer-*` headers ON THOSE ROUTES — nothing there reads them.
+  `cms_origin_open_paths = []` closes the door (then the uploads must go through `www.gkoi.com`).
+- **The value** lands in this stack's encrypted state while the lock is on (as the live-origin one). 32–128 characters
+  of `[A-Za-z0-9_-]` (a precondition). The same header NAME as origin-live, a DIFFERENT secret (live's is shared with
+  the engine edge and the media boxes).
+- **Health checks** are not affected: a target group's health check goes from the ALB nodes straight to the task,
+  never through a listener rule. The Route 53 health check on `www.gkoi.com` goes through CloudFront.
+
+Roll-out (each step is safe on its own; nothing is refused before step 4):
+
+1. `gkoi-infra-run edge-alb apply` with `site_origin_lock = false` (the default): creates the EMPTY secret; no rule
+   changes. Roll-back: none needed (an unused secret).
+2. `tools/gkoi-origin-header set` — makes the value, stores it, sets the header on the three distributions (harmless:
+   the ALB ignores it). Then `tools/gkoi-origin-header wait` and `check`: three × `present=yes`, ONE fingerprint, all
+   `Deployed`. Roll-back: `tools/gkoi-origin-header remove`.
+3. Commit `site_origin_lock = true` (variables.tf default), `gkoi-infra-run edge-alb plan` — read it: the plan FAILS if
+   the secret has no value; it must show only listener rules (9 to create, 5 to update in place, nothing destroyed).
+4. `gkoi-infra-run edge-alb apply`. The new allow rules are created before the old ones change (depends_on).
+   Verify (expect, in order: 200 · 200 · 200 · 403 · 403 · 403 · 403 · 301 · not 403 · 401/403 from the APP, not the ALB's
+   plain-text `Forbidden`):
+   ```
+   curl -s -o /dev/null -w '%{http_code}\n' https://www.gkoi.com/
+   curl -s -o /dev/null -w '%{http_code}\n' https://cdn.gkoi.com/assets/<a real asset path>
+   curl -s -o /dev/null -w '%{http_code}\n' https://labs.gkoi.com/content/labs/<a real build file>
+   curl -s -o /dev/null -w '%{http_code}\n' https://origin-www.gkoi.com/
+   curl -s -o /dev/null -w '%{http_code}\n' --resolve www.gkoi.com:443:"$(dig +short origin-www.gkoi.com | head -1)" https://www.gkoi.com/
+   curl -s -o /dev/null -w '%{http_code}\n' https://origin-cdn.gkoi.com/assets/<the same asset path>
+   curl -s -o /dev/null -w '%{http_code}\n' https://origin-labs.gkoi.com/content/labs/<the same build file>
+   curl -s -o /dev/null -w '%{http_code}\n' https://gkoi.com/
+   curl -s -o /dev/null -w '%{http_code}\n' https://engine.gkoi.com/healthz ; curl -s -o /dev/null -w '%{http_code}\n' https://files.gkoi.com/api/v1/healthz
+   curl -s -w '\n%{http_code}\n' -X POST https://origin-www.gkoi.com/api/v1/downloads/gkoi-live/macos
+   ```
+   Roll-back: commit `site_origin_lock = false`, apply (5 in place, 9 destroyed — needs `--allow-destroy`; the old
+   forwards come back before the locked ones go). Faster, if the site is down: nothing by hand — the apply is ~1 minute.
+
+Rotation (no refused request at any point): `gkoi-origin-header set --no-push` (new value = AWSCURRENT, the old one
+AWSPREVIOUS) → commit `site_origin_accept_previous = true`, apply (the ALB accepts both) → `gkoi-origin-header push`,
+`wait`, `check` → commit `site_origin_accept_previous = false`, apply (the old value stops working). `push` needs
+`iam/gkoi-orchestrator-origin-lock.json`.
+
+Still open after the lock (follow-ups, not built): the CMS's own nginx trusts `CloudFront-Viewer-*` from the whole VPC
+(`CMS_REALIP_FROM`) — it could also require the header; a CloudFront distribution in another AWS account can not pass
+the lock (it does not know the secret), which is the point of the header over a prefix-list rule.
 
 ## Apply order
 
@@ -156,8 +231,8 @@ Cheaper knobs if wanted: endpoints in one AZ only (~−$65), drop flow logs to `
   `X-Labs-Isolation` (harmless while no `CMS_LABS_ISOLATION_TOKEN` is set: no header value can match an empty token map).
 - **edge-alb, the files allow-list (audit B3-6).** `files.gkoi.com`: `fm_public_paths` (prod's public listener:
   `/api/v1/app/*`, `/thumbs/*`, `/api/v1/healthz`, `/api/v1/readyz`) for everyone; every other path only from
-  `cms_source_cidrs` (the Lightsail site box until P4, then the home NAT — which EVERY ECS task leaves by, the engine
-  pilot included); else 404. Prod's nginx also refused dot-segment / `%2e` / `%2f` / `//` paths before routing; the ALB
+  `cms_source_cidrs` (the home NAT — which EVERY ECS task leaves by, the engine pilot included; the Lightsail site
+  box's address left the list after P4 and the box was retired on 2026-11-17); else 404. Prod's nginx also refused dot-segment / `%2e` / `%2f` / `//` paths before routing; the ALB
   matches the raw path with no such guard: probe `curl --path-as-is https://files.gkoi.com/api/v1/app/../admin/…` after
   the apply (an ALB rule refusing those shapes is a possible follow-up).
 - **registry, replication:** ECR replication is ONE registry-wide setting per region. This stack owns it in us-west-2; an
@@ -223,7 +298,8 @@ addresses (RDS endpoint, buckets, the VPC CIDR) come from state. `__SET_ME__` ma
 CMS DB name/role, `SESSION_COOKIE_NAME` — must equal prod's or everyone is signed out once —, the SMTP set,
 `MK_POOL_API_USER`, the platform client ids, the FM's `CDN_KEY_PAIR_ID`): pass them in a git-ignored
 `*.tfvars` or `-var`, never a secret. The engine runs `RELAY_REGISTRY_ONLY=1` with NO `RELAY_POOL_INSTANCES`: the media
-boxes register their pools (envs/prod2/media); never pass the Lightsail list here.
+boxes register their pools (envs/prod2/media); never pass a static list here (the old Lightsail one is dead: those
+servers were retired on 2026-11-17).
 
 ### Migrate, then update
 

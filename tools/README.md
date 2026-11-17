@@ -5,9 +5,10 @@
 | `gkoi-tag <repo> (--gate-log F \| --yes) [--push]` | cut `gkoi-YYYY.MM.DD-N` (UTC, next free N) on the repo's current commit after its gate passed |
 | `gkoi-release <repo> <tag> [--dry-run] …` | zip the tag from the local checkout → S3 → CodeBuild gate + build + push → `envs/prod2/releases/<repo>.json` |
 | `gkoi-infra-run <stack> plan\|apply …` | zip this repo → S3 → the `gkoi-infra-runner` CodeBuild project → stream its log |
-| `gkoi-db-dump <cms\|engine\|fm> [--check] [--no-upload]` | read-only `pg_dump -Fc --no-owner --no-acl` inside the prod box's postgres container → here (0600, sha256) → `s3://gkoi-prod2-db-transit-127214190346/<app>/<stamp>/<db>.dump` |
+| `gkoi-db-dump <cms\|engine\|fm> [--check] [--no-upload]` | **RETIRED 2026-11-17 with the Lightsail servers (refuses to run without an explicit `GKOI_DB_DUMP_HOST`).** Was: read-only `pg_dump -Fc --no-owner --no-acl` inside the prod box's postgres container → here (0600, sha256) → `s3://gkoi-prod2-db-transit-127214190346/<app>/<stamp>/<db>.dump` |
 | `gkoi-db-restore <app> <key> [--sha256 H] [--drop-first]` | the one-off ECS task `gkoi-prod2-db-restore-<app>` (stack `db-restore`): fetch + sha check → role + database + `pg_restore --role` into RDS → ownership proof; waits, prints the log |
 | `gkoi-rehearsal [--only K,K] [--seconds N] [--parallel] [--config F] [--dry-run]` | the private go-live rehearsal: the one-off ECS task `gkoi-prod2-rehearsal-driver` (stack `rehearsal`) — every media region: session, 60 s RTMPS publish, live + LL-HLS via the origin and the engine, recording + thumbnails + MP4 in the scratch bucket; follows the log, exits with the driver's PASS/FAIL code |
+| `gkoi-origin-header check\|set\|push\|remove\|wait [--dry-run]` | the `X-Origin-Verify` origin header of the hand-managed CloudFront distributions www / cdn / labs and the secret `gkoi/prod2/edge/site-origin` behind it (edge-alb's site-origin lock — the root README has the order); never prints the value |
 | `gkoi-lint-buildspecs` | check `buildspecs/*.yml` (YAML, the shared block identical, bash -n, shellcheck) |
 | `lib/gkoi-tools.sh` | shared by the above |
 
@@ -80,6 +81,9 @@ repo's own root `buildspec.yml` from the zip (no override). One run at a time: t
 `--dry-run`, `--no-start` and `--upload-url-file` work as in gkoi-release.
 
 ## Databases: prod → RDS (`gkoi-db-dump` + `gkoi-db-restore`, stack `envs/prod2/db-restore`)
+
+> **HISTORY (P1–P4, done 2026-11-11).** The source boxes (`gkoi-beta-site`, `gkoi-beta-core`) were the Lightsail servers,
+> RETIRED on 2026-11-17: `gkoi-db-dump` now refuses its default hosts. Do not run the dump commands below against them.
 
 Once: apply `registry` (repos `gkoi/ci-postgres`, `gkoi/ci-aws-cli`), push the two mirrors, apply `db-restore`:
 

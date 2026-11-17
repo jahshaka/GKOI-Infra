@@ -3,14 +3,14 @@
 # the private engine ports; the media origin's 443), an instance role under /gkoi/, the box's config in SSM, the
 # rehearsal DNS records and a few alarms. What runs ON the box is envs/prod2/media/box/ (README there).
 #
-# Ports — the live Lightsail media box's (2026-11-11: `docker ps` + the Lightsail firewall), pool i = 0..pool_count-1:
+# Ports — copied from the Lightsail media box (2026-11-11: `docker ps` + its firewall; that box was retired 2026-11-17), pool i = 0..pool_count-1:
 #   public   tcp (i+1)1936  RTMPS ingest (MediaMTX terminates TLS)       11936, 21936
 #            udp 8189+100·i WebRTC ICE (WHIP publish, WHEP preview)      8189, 8289
 #            tcp 443        media origin (CloudFront → /r/<slug>/…)      SG `-origin`: CloudFront's prefix list
 #   private  tcp (i+1)8888  LL-HLS, (i+1)8889 WHIP/WHEP signalling, (i+1)9997 control API — for the engine api/worker
-#            (the api proxies watch/WHIP/WHEP and reads readiness at the pool's apiHost; DOCKER-USER on Lightsail
+#            (the api proxies watch/WHIP/WHEP and reads readiness at the pool's apiHost; DOCKER-USER on the old box
 #            allowed only the control box — here the SG does it: the home ECS tasks only)
-#   NOT open: plain RTMP (i+1)1935 (published by compose as on the live box, closed by its Lightsail firewall too),
+#   NOT open: plain RTMP (i+1)1935 (published by compose as on the old box, which closed it in its firewall too),
 #             22 (SSM only), 80.
 
 terraform {

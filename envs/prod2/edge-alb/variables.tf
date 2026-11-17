@@ -105,10 +105,11 @@ variable "live_origin_path" {
 
 variable "cms_source_cidrs" {
   description = <<-EOT
-    The CMS's source addresses as the ALB sees them: the Lightsail site box (52.24.67.48, until P4) and the home NAT
-    (32.189.104.202 — after P4 the CMS on ECS, like every ECS task, leaves by it). files.gkoi.com serves its non-public
-    paths only to these. compute's variable of the same name feeds the engine edge's EDGE_ALLOW_CIDR(_2) and the api's
-    TRUSTED_PROXIES — keep the two equal. 1–2 IPv4 CIDRs (the engine edge takes two).
+    The CMS's source addresses as the ALB sees them: the home NAT (32.189.104.202 — the CMS on ECS, like every ECS
+    task, leaves by it). files.gkoi.com serves its non-public paths only to these. compute's variable of the same name
+    feeds the engine edge's EDGE_ALLOW_CIDR(_2) and the api's TRUSTED_PROXIES — keep the two equal. 1–2 IPv4 CIDRs (the
+    engine edge takes two). History: until the P4 window (2026-11-11) the list also held the Lightsail site box,
+    52.24.67.48 — that server was retired on 2026-11-17 and its address released: never add it back.
   EOT
   type        = list(string)
   default     = ["32.189.104.202/32"]
@@ -143,6 +144,51 @@ variable "cms_site_host" {
   description = "The site's canonical label (www): where the apex and the labs host's other paths redirect."
   type        = string
   default     = "www"
+}
+
+variable "cms_site_origin_host" {
+  description = "The www.gkoi.com distribution's origin label (one of services.cms.hosts): the host of the site-origin lock's open door (cms_origin_open_paths)."
+  type        = string
+  default     = "origin-www"
+}
+
+# --- the site-origin lock (audit 2026-11-17; README "The site-origin lock") --------------------------------------
+
+variable "site_origin_secret_name" {
+  description = "The Secrets Manager entry (created EMPTY by this stack) whose value CloudFront www / cdn / labs send to their origins in X-Origin-Verify."
+  type        = string
+  default     = "gkoi/prod2/edge/site-origin"
+}
+
+variable "site_origin_lock" {
+  description = <<-EOT
+    false = the cms hosts (origin-www / www / origin-cdn / origin-labs) answer anyone, as before 2026-11-17. true = they
+    forward ONLY requests carrying the site-origin secret in X-Origin-Verify; everything else on them is a 403 (except
+    cms_origin_open_paths). Turn it on ONLY after the three CloudFront distributions send the header and are Deployed
+    (tools/gkoi-origin-header check) — the README has the order and the rollback (set it back to false and apply).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "site_origin_accept_previous" {
+  description = "Rotation only: also accept the secret's AWSPREVIOUS value, while CloudFront moves from the old value to the new one (README \"The site-origin lock\", rotation)."
+  type        = bool
+  default     = false
+}
+
+variable "cms_origin_open_paths" {
+  description = <<-EOT
+    Paths of origin-www.gkoi.com that stay reachable WITHOUT the site-origin secret while the lock is on: the build
+    boxes' upload API (multi-GiB bodies sent straight to the origin; every route checks its own publisher key). At most
+    4 (1 host + 4 paths = the 5-value rule limit). [] = nothing stays open.
+  EOT
+  type        = list(string)
+  default     = ["/api/v1/downloads/*", "/api/v1/app-updates/*"]
+  validation {
+    condition     = length(var.cms_origin_open_paths) <= 4 && alltrue([for p in var.cms_origin_open_paths : startswith(p, "/api/v1/")])
+    error_message = "cms_origin_open_paths: at most 4 paths, each under /api/v1/."
+  }
 }
 
 variable "apex_redirect" {

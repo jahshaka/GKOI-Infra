@@ -39,7 +39,8 @@ nothing reads it; destroy it after the window).
   brokered device for its test user (`POST /api/v1/broker/devices`) and mints the device's 1-hour token
   (`/broker/devices/:id/token`), then calls the APP routes with it exactly as GKOI Live does (`/api/v1/app/regions`,
   `/app/sessions`, `/app/sessions/:id/ingest`, `/end`). Engine code at f997524; no engine change needed.
-- **Reaching the engine.** `engine.gkoi.com` still resolves to Lightsail. The driver connects to edge-alb's ALB
+- **Reaching the engine.** (Written before the 2026-11-11 window, when `engine.gkoi.com` still resolved to the
+  Lightsail core box — retired 2026-11-17; the name is an alias to the ALB now.) The driver connects to edge-alb's ALB
   (`ENGINE_CONNECT_HOST` = its DNS name) with TLS SNI + Host `engine.gkoi.com` — the ALB's certificate and host rule,
   then the engine edge. It leaves the VPC by the home NAT (32.189.104.202), which is in the edge allow-list
   (`cms_source_cidrs` → `EDGE_ALLOW_CIDR_2`), so the broker / gateway routes (`/api/`) are open to it — as they will be to

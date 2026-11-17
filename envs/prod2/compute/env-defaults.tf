@@ -70,8 +70,8 @@ locals {
     HOME_DESTINATION_NAME = "GKOI"
     LIVE_CDN_BASE         = "https://live.gkoi.com"
     # SPEC-ENGINE-DYNAMIC-REGIONS-V1 C1: every pool comes from the live registry (the EC2 media boxes register
-    # themselves — envs/prod2/media). RELAY_POOL_INSTANCES is deliberately ABSENT: the Lightsail list (172.26.x /
-    # 10.88.x, unroutable from the VPC) must never reach AWS — a static entry never leaves the registry, so placement
+    # themselves — envs/prod2/media). RELAY_POOL_INSTANCES is deliberately ABSENT: the old Lightsail list (172.26.x /
+    # 10.88.x; those servers were retired on 2026-11-17) must never reach AWS — a static entry never leaves the registry, so placement
     # would keep choosing it. The api accepts no list only with this flag (config.ts, f997524); the worker needs no flag
     # (its list defaults to empty) and ignores this one.
     RELAY_REGISTRY_ONLY = "1"

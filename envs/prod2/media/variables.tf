@@ -34,7 +34,7 @@ variable "media_regions" {
                             false stops the plan — roll the records back by hand + `terraform state rm` (README)
       origin_verify_secret  the Secrets Manager name of the X-Origin-Verify CloudFront sends to this region's origin
       origin_ingress_cidrs  extra CIDRs to 443 besides CloudFront's origin-facing list (a rehearsal tester)
-      origin_open_to_world  443 from anywhere (the Lightsail box's rule); default false = CloudFront only
+      origin_open_to_world  443 from anywhere (the retired Lightsail box's rule); default false = CloudFront only
       instance_type, pool_count (1–5), root_volume_gib, min_size / max_size / desired_capacity — see the defaults
   EOT
   type = map(object({
@@ -134,7 +134,7 @@ variable "default_instance_type" {
 }
 
 variable "ami_ssm_parameter" {
-  description = "Canonical's Ubuntu 24.04 LTS amd64 (the game boxes' and the Lightsail media boxes' OS)."
+  description = "Canonical's Ubuntu 24.04 LTS amd64 (the game boxes' OS; the retired Lightsail media boxes ran it too)."
   type        = string
   default     = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }

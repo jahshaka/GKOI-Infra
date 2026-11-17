@@ -41,3 +41,14 @@ output "target_groups" {
     }
   }
 }
+
+output "site_origin_lock" {
+  description = "The site-origin lock as applied: on/off, whether the previous secret value is also accepted, the secret (name + ARN — never the value), the paths of origin-www left open."
+  value = {
+    enabled         = var.site_origin_lock
+    accept_previous = var.site_origin_lock && var.site_origin_accept_previous
+    secret_name     = aws_secretsmanager_secret.site_origin.name
+    secret_arn      = aws_secretsmanager_secret.site_origin.arn
+    open_paths      = var.site_origin_lock ? var.cms_origin_open_paths : []
+  }
+}

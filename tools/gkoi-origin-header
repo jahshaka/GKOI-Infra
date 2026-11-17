@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# gkoi-origin-header: the X-Origin-Verify origin custom header of the SITE's CloudFront distributions (hand-managed —
+# they are not in Terraform) and the secret behind it. README "The site-origin lock" has the order of the roll-out.
+#
+#   gkoi-origin-header check                 per distribution: Status, and per locked origin: header present? length,
+#                                            fingerprint (the first 8 hex of its sha256 — never the value)
+#   gkoi-origin-header set [--dry-run]       FIRST TIME: make a new random value, put it in the secret, set it on the
+#                                            three distributions' origins. Needs no read access to the secret.
+#   gkoi-origin-header set --no-push         ROTATION step 1: make + put a new value only (the old one becomes AWSPREVIOUS)
+#   gkoi-origin-header push [--dry-run]      ROTATION step 3 / repair: read the secret's CURRENT value and set it on the
+#                                            distributions (needs secretsmanager:GetSecretValue — iam/gkoi-orchestrator-origin-lock.json)
+#   gkoi-origin-header remove [--dry-run]    take the header off the three origins again (roll-back of `set`; ONLY while
+#                                            edge-alb's site_origin_lock is false — with the lock on it takes the site down)
+#   gkoi-origin-header wait                  block until the three distributions are Deployed
+#
+# What it touches: www E32GUUVFJFZWS7 origin `origin-www.gkoi.com`, cdn E16YQ7HYLBQUPQ origin `origin-cdn.gkoi.com` (NOT
+# its files.gkoi.com origin), labs E28154TBILFIGK origin `origin-labs.gkoi.com` — ONLY the origin's CustomHeaders item
+# named X-Origin-Verify; every other field of the distribution config is sent back exactly as read (If-Match = the
+# ETag just read, so a concurrent change makes the update fail instead of being overwritten).
+# The value is never printed and never on a command line: it lives in 0600 files in a 0700 temp directory that is
+# removed on exit, and every AWS answer that would carry it is discarded (--query).
+# Overrides: GKOI_SITE_ORIGIN_SECRET (default gkoi/prod2/edge/site-origin).
+set -euo pipefail
+GKOI_TOOL=gkoi-origin-header
+# shellcheck source=lib/gkoi-tools.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
+
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 1 ] || usage
+CMD="$1"; shift
+DRY=0 PUSH=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --no-push) PUSH=0; shift ;;
+    -h|--help) usage ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+case "$CMD" in check|set|push|remove|wait) ;; -h|--help) usage ;; *) die "unknown command '$CMD'" ;; esac
+
+SECRET="${GKOI_SITE_ORIGIN_SECRET:-gkoi/prod2/edge/site-origin}"
+HEADER="X-Origin-Verify"
+# name  distribution id  origin domain
+TARGETS=(
+  "www E32GUUVFJFZWS7 origin-www.gkoi.com"
+  "cdn E16YQ7HYLBQUPQ origin-cdn.gkoi.com"
+  "labs E28154TBILFIGK origin-labs.gkoi.com"
+)
+
+umask 077
+GKOI_WORK="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-origin-header.XXXXXX")"
+trap 'rm -rf "$GKOI_WORK"' EXIT
+
+status_of() { awsc cloudfront get-distribution --id "$1" --query Distribution.Status --output text; }
+
+# Read a distribution's config into <name>.json ({ETag, DistributionConfig}); the file may hold a header value.
+read_config() { # <name> <id>
+  awsc cloudfront get-distribution-config --id "$2" --output json >"$GKOI_WORK/$1.json" \
+    || die "cannot read distribution $2 ($1)"
+}
+
+# Print "<present yes|no> <length> <fingerprint>" for the header on the origin; never the value.
+describe() { # <name> <origin domain>
+  python3 -I - "$GKOI_WORK/$1.json" "$2" "$HEADER" <<'PY'
+import hashlib, json, sys
+cfg = json.load(open(sys.argv[1]))["DistributionConfig"]
+origins = [o for o in cfg["Origins"]["Items"] if o["DomainName"] == sys.argv[2]]
+if len(origins) != 1:
+    sys.exit(f"expected exactly one origin {sys.argv[2]}, found {len(origins)}")
+items = [h for h in (origins[0].get("CustomHeaders") or {}).get("Items") or [] if h["HeaderName"].lower() == sys.argv[3].lower()]
+if not items:
+    print("no 0 -")
+else:
+    v = items[0]["HeaderValue"]
+    print("yes", len(v), hashlib.sha256(v.encode()).hexdigest()[:8])
+PY
+}
+
+# Write <name>.new.json (the DistributionConfig alone) with the header set to the value in <value file>, or removed.
+# Prints "changed" or "same".
+rewrite() { # <name> <origin domain> <value file | ->
+  python3 -I - "$GKOI_WORK/$1.json" "$2" "$HEADER" "$3" "$GKOI_WORK/$1.new.json" <<'PY'
+import json, os, sys
+src, domain, name, valf, dst = sys.argv[1:6]
+cfg = json.load(open(src))["DistributionConfig"]
+before = json.dumps(cfg, sort_keys=True)
+origins = [o for o in cfg["Origins"]["Items"] if o["DomainName"] == domain]
+if len(origins) != 1:
+    sys.exit(f"expected exactly one origin {domain}, found {len(origins)}")
+o = origins[0]
+items = [h for h in (o.get("CustomHeaders") or {}).get("Items") or [] if h["HeaderName"].lower() != name.lower()]
+if valf != "-":
+    value = open(valf).read().strip()
+    if not (32 <= len(value) <= 128) or not all(c.isalnum() or c in "_-" for c in value) or not value.isascii():
+        sys.exit("the value must be 32–128 characters of [A-Za-z0-9_-]")
+    items.append({"HeaderName": name, "HeaderValue": value})
+o["CustomHeaders"] = {"Quantity": len(items), "Items": items} if items else {"Quantity": 0}
+fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f)
+print("same" if json.dumps(cfg, sort_keys=True) == before else "changed")
+PY
+}
+
+apply_all() { # <value file | ->
+  local t name id domain what etag
+  for t in "${TARGETS[@]}"; do
+    read -r name id domain <<<"$t"
+    read_config "$name" "$id"
+    what="$(rewrite "$name" "$domain" "$1")" || die "$name: could not prepare the new config"
+    if [ "$what" = same ]; then say "$name $id $domain: already so — nothing to send"; continue; fi
+    if [ "$DRY" = 1 ]; then say "$name $id $domain: WOULD update (dry run; only the $HEADER item of this origin differs)"; continue; fi
+    etag="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["ETag"])' "$GKOI_WORK/$name.json")"
+    awsc cloudfront update-distribution --id "$id" --if-match "$etag" --distribution-config "file://$name.new.json" \
+      --query Distribution.Status --output text >"$GKOI_WORK/$name.status" \
+      || die "$name: update-distribution FAILED (nothing changed on this one; the ones before it WERE updated — run 'check')"
+    say "$name $id $domain: updated → $(cat "$GKOI_WORK/$name.status")"
+  done
+}
+
+new_value() { python3 -I -c 'import secrets; print(secrets.token_urlsafe(48))' >"$GKOI_WORK/value"; }
+
+case "$CMD" in
+  check)
+    for t in "${TARGETS[@]}"; do
+      read -r name id domain <<<"$t"
+      read_config "$name" "$id"
+      read -r present len fp <<<"$(describe "$name" "$domain")"
+      say "$name $id ($(status_of "$id")) origin $domain: $HEADER present=$present length=$len fingerprint=$fp"
+    done
+    say "READY for site_origin_lock = true only when: present=yes on all three, the three fingerprints equal, every Status Deployed"
+    ;;
+  wait)
+    for t in "${TARGETS[@]}"; do
+      read -r name id domain <<<"$t"
+      say "waiting for $name $id to be Deployed"
+      awsc cloudfront wait distribution-deployed --id "$id" || die "$name $id did not reach Deployed"
+    done
+    say "all three Deployed"
+    ;;
+  set)
+    if [ "$PUSH" = 1 ]; then
+      # A header already in place means the lock may be ON: replacing the value in one go would 403 the whole site until
+      # the ALB learns it. That is a ROTATION — it goes set --no-push → apply (accept_previous) → push.
+      for t in "${TARGETS[@]}"; do
+        read -r name id domain <<<"$t"
+        read_config "$name" "$id"
+        read -r present _ _ <<<"$(describe "$name" "$domain")"
+        [ "$present" = no ] || die "$name already sends $HEADER — a new value is a ROTATION: 'set --no-push', apply edge-alb with site_origin_accept_previous = true, then 'push' (a half-done first run: 'remove', then 'set')"
+      done
+    fi
+    new_value
+    if [ "$DRY" = 1 ]; then
+      say "DRY RUN: would put a new 64-character value into $SECRET$([ "$PUSH" = 1 ] && printf ' and set it on:')"
+    else
+      awsc secretsmanager put-secret-value --secret-id "$SECRET" --secret-string file://value \
+        --query VersionId --output text >"$GKOI_WORK/version" || die "put-secret-value on $SECRET failed (is edge-alb applied — does the secret exist?)"
+      say "$SECRET: new value stored (version $(cat "$GKOI_WORK/version")); the one before it is AWSPREVIOUS"
+    fi
+    if [ "$PUSH" = 1 ]; then apply_all "$GKOI_WORK/value"; else say "--no-push: CloudFront untouched (rotation: now apply edge-alb with site_origin_accept_previous = true, then 'push')"; fi
+    ;;
+  push)
+    awsc secretsmanager get-secret-value --secret-id "$SECRET" --query SecretString --output text >"$GKOI_WORK/value" \
+      || die "cannot read $SECRET (attach iam/gkoi-orchestrator-origin-lock.json to gkoi-orchestrator)"
+    apply_all "$GKOI_WORK/value"
+    ;;
+  remove)
+    apply_all -
+    ;;
+esac
+[ "$DRY" = 1 ] || [ "$CMD" = check ] || [ "$CMD" = wait ] || say "CloudFront deploys a change in a few minutes: '$GKOI_TOOL wait', then '$GKOI_TOOL check'"

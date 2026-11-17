@@ -47,6 +47,21 @@ locals {
   # every other cms host (origin-www, www) is forwarded whole, as prod's www server block does
   cms_open_fqdns = [for h in local.service_fqdns["cms"] : h if h != local.cms_cdn_fqdn && h != local.cms_labs_fqdn]
 
+  # --- the site-origin lock (audit 2026-11-17; README "The site-origin lock") ----------------------------------
+  # The values a request to the cms hosts must carry in X-Origin-Verify once var.site_origin_lock is on: the secret's
+  # AWSCURRENT value, plus AWSPREVIOUS while a rotation is in flight (var.site_origin_accept_previous).
+  site_lock = var.site_origin_lock
+  site_secrets = distinct(concat(
+    [for v in data.aws_secretsmanager_secret_version.site_origin : v.secret_string],
+    [for v in data.aws_secretsmanager_secret_version.site_origin_previous : v.secret_string],
+  ))
+  site_origin_fqdn = "${var.cms_site_origin_host}.${var.zone_name}"
+  # cdn, locked: one forward rule per path × method (1 host + ≤ 2 secret values + 1 path + 1 method = the 5-value limit)
+  cms_cdn_locked = local.site_lock ? {
+    for i, pm in setproduct(var.cms_cdn_paths, ["GET", "HEAD"]) : "${pm[0]} ${pm[1]}" => { path = pm[0], method = pm[1], priority = 196 + i }
+  } : {}
+  cms_labs_locked = local.site_lock ? { GET = 208, HEAD = 209 } : {}
+
   # --- files (audit B3-6): prod's public file-manager listener is an allow-list --------------------------------
   fm_fqdns = local.service_fqdns["fm-api"]
   # ≤ 3 values per condition: the public paths in groups of three, one rule each (priorities 300, 301, …)
@@ -60,6 +75,27 @@ data "aws_route53_zone" "this" {
 
 data "aws_secretsmanager_secret_version" "live_origin" {
   secret_id = var.live_origin_secret_id
+}
+
+# The site-origin secret: created EMPTY here (no version — as compute's secrets: the value is put by the orchestrator,
+# tools/gkoi-origin-header, never by Terraform). It is READ only while the lock is on; the value then lands in this
+# stack's (encrypted) state, as the live-origin one does. A plan with the lock on and no value in the secret FAILS —
+# on purpose: the lock can not be switched on before the secret (and so CloudFront's header) exists.
+resource "aws_secretsmanager_secret" "site_origin" {
+  name                    = var.site_origin_secret_name
+  description             = "X-Origin-Verify for the site's CloudFront origins (www / cdn / labs → origin-www / origin-cdn / origin-labs). The value is put by tools/gkoi-origin-header, never by Terraform."
+  recovery_window_in_days = 7
+}
+
+data "aws_secretsmanager_secret_version" "site_origin" {
+  count     = local.site_lock ? 1 : 0
+  secret_id = aws_secretsmanager_secret.site_origin.id
+}
+
+data "aws_secretsmanager_secret_version" "site_origin_previous" {
+  count         = local.site_lock && var.site_origin_accept_previous ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.site_origin.id
+  version_stage = "AWSPREVIOUS"
 }
 
 # --- certificate -------------------------------------------------------------------------------------------------
@@ -216,8 +252,8 @@ resource "aws_lb_listener" "https" {
   ssl_policy        = var.ssl_policy
   certificate_arn   = aws_acm_certificate_validation.alb.certificate_arn
 
-  # HSTS on every response of this listener (www / apex / labs / cdn origins, engine, files): the Lightsail host nginx
-  # used to add it; nothing did after the move (2026-11-11). No includeSubDomains / preload: stream-*, game-* and dev
+  # HSTS on every response of this listener (www / apex / labs / cdn origins, engine, files): the host nginx of the
+  # Lightsail site box (retired 2026-11-17) used to add it; nothing did after the move (2026-11-11). No includeSubDomains / preload: stream-*, game-* and dev
   # hosts stay unpinned. Set by hand the same day; this keeps an apply from clearing it.
   routing_http_response_strict_transport_security_header_value = "max-age=31536000"
 
@@ -365,18 +401,36 @@ resource "aws_lb_listener_rule" "host" {
 }
 
 # --- cms (priorities 200–230) — audit 2026-11-11 B4-2 / B4-3 / B4-4 ---------------------------------------------
-# Prod's HOST nginx on the Lightsail site box (sites-enabled/{www,cdn,labs}.gkoi.com) put a server block per name in
-# front of the container nginx. What an ALB rule can reproduce is here; what it can not — rewriting Host (the AWS
+# Until 2026-11-11 prod's HOST nginx on the Lightsail site box (retired 2026-11-17; sites-enabled/{www,cdn,labs}.gkoi.com)
+# put a server block per name in front of the container nginx. What an ALB rule can reproduce is here; what it can not — rewriting Host (the AWS
 # provider in use, < 6.0, has no listener-rule `transform`), stripping Cookie / Set-Cookie / X-Labs-Isolation — is
 # listed in README "edge-alb, the cms hosts".
 # The new numbers do not reuse 100 / 120 (the old generic cms / files rules): an apply creates these while it deletes
 # those, and two rules may not share a priority.
 
+# THE SITE-ORIGIN LOCK (audit 2026-11-17 — README "The site-origin lock"). These hosts are CloudFront ORIGINS; the ALB
+# itself is open to the internet (engine / files / the apex are reached directly, by design), so without a lock anyone
+# could talk to the site around its CDN and hand-write the CloudFront-Viewer-* headers the app trusts. With
+# var.site_origin_lock on, every forwarding rule below also demands X-Origin-Verify = the site-origin secret (the three
+# distributions add it as an origin custom header — hand-managed, tools/gkoi-origin-header) and everything else on
+# these hosts is a fixed 403, as origin-live does (rules 10–13). An ALB rule has no "not", so the secret is a condition
+# of each allow rule and a 403 rule closes each host; a rule takes at most 5 condition values, so the cdn / labs
+# forward rules are split per path / method (leaving room for TWO secret values during a rotation). With the lock off
+# the rules are exactly the pre-lock ones. Each in-place change waits (depends_on) for the new allow rules, so no
+# request that is allowed after the apply is refused during it.
+
+locals {
+  forbidden_text = { content_type = "text/plain", status_code = "403", message_body = "Forbidden" }
+}
+
 # origin-cdn (CloudFront cdn.gkoi.com, Host = origin-cdn.gkoi.com): ONLY /content/** and /assets/**, GET/HEAD — the
 # same answers as prod's `limit_except GET HEAD { deny all; }` (403) and `location / { return 404; }`.
-resource "aws_lb_listener_rule" "cms_cdn" {
+# Locked: 196–199 forward (secret + one path + one method); 200 = secret + those paths, another method → 403;
+# 201 = those paths without the secret → 403; 202 = secret, another path → 404; 203 = everything else → 403.
+resource "aws_lb_listener_rule" "cms_cdn_locked" {
+  for_each     = local.cms_cdn_locked
   listener_arn = aws_lb_listener.https.arn
-  priority     = 200
+  priority     = each.value.priority
 
   action {
     type             = "forward"
@@ -387,16 +441,75 @@ resource "aws_lb_listener_rule" "cms_cdn" {
     host_header { values = [local.cms_cdn_fqdn] }
   }
   condition {
-    path_pattern { values = var.cms_cdn_paths }
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = local.site_secrets
+    }
   }
   condition {
-    http_request_method { values = ["GET", "HEAD"] }
+    path_pattern { values = [each.value.path] }
   }
+  condition {
+    http_request_method { values = [each.value.method] }
+  }
+}
+
+resource "aws_lb_listener_rule" "cms_cdn" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 200
+
+  dynamic "action" {
+    for_each = local.site_lock ? [] : [1]
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.svc["cms"].arn
+    }
+  }
+  dynamic "action" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      type = "fixed-response"
+      fixed_response {
+        content_type = local.forbidden_text.content_type
+        status_code  = local.forbidden_text.status_code
+        message_body = local.forbidden_text.message_body
+      }
+    }
+  }
+
+  condition {
+    host_header { values = [local.cms_cdn_fqdn] }
+  }
+  dynamic "condition" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = local.site_secrets
+      }
+    }
+  }
+  condition {
+    path_pattern { values = var.cms_cdn_paths }
+  }
+  dynamic "condition" {
+    for_each = local.site_lock ? [] : [1]
+    content {
+      http_request_method { values = ["GET", "HEAD"] }
+    }
+  }
+
+  depends_on = [aws_lb_listener_rule.cms_cdn_locked]
 
   lifecycle {
     precondition {
       condition     = contains(local.service_fqdns["cms"], local.cms_cdn_fqdn) && length(var.cms_cdn_paths) <= 2
       error_message = "cms_cdn_origin_host must be one of services.cms.hosts, and cms_cdn_paths at most 2 (1 host + 2 paths + 2 methods = the 5-value rule limit)."
+    }
+    precondition {
+      # ALB condition values are at most 128 chars (the same rule as the live-origin secret).
+      condition     = alltrue([for v in local.site_secrets : can(regex("^[A-Za-z0-9_-]{32,128}$", v))])
+      error_message = "The site-origin secret must be 32–128 characters of [A-Za-z0-9_-] to fit an ALB header condition."
     }
   }
 }
@@ -438,18 +551,48 @@ resource "aws_lb_listener_rule" "cms_cdn_other" {
   condition {
     host_header { values = [local.cms_cdn_fqdn] }
   }
+  dynamic "condition" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = local.site_secrets
+      }
+    }
+  }
 }
 
-# origin-labs (CloudFront labs.gkoi.com, Host = origin-labs.gkoi.com). Prod rewrote Host to labs.gkoi.com so the
-# container nginx's LABS server block (server_name labs.invalid ${LABS_HOST}) answered: /content/labs/** off disk with
-# the per-version isolation headers, everything else a 302 to the site's /labs. The ALB can not rewrite Host, so until
-# the container nginx also names origin-labs.gkoi.com (README "edge-alb, the cms hosts") the request lands on the MAIN
-# server. These rules keep the labs name from serving the whole site meanwhile: /content/labs/** GET/HEAD is
-# forwarded, any other GET/HEAD gets the labs block's own 302 to the site's Labs page, any other method 403 (prod's
-# `limit_except GET HEAD`). Once the nginx side lands they stay correct (the labs block then answers /content/labs/**).
-resource "aws_lb_listener_rule" "cms_labs" {
+resource "aws_lb_listener_rule" "cms_cdn_forbidden" {
+  count        = local.site_lock ? 1 : 0
   listener_arn = aws_lb_listener.https.arn
-  priority     = 210
+  priority     = 203
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = local.forbidden_text.content_type
+      status_code  = local.forbidden_text.status_code
+      message_body = local.forbidden_text.message_body
+    }
+  }
+
+  condition {
+    host_header { values = [local.cms_cdn_fqdn] }
+  }
+}
+
+# origin-labs (CloudFront labs.gkoi.com, Host = origin-labs.gkoi.com). The old host nginx rewrote Host to labs.gkoi.com
+# so the container nginx's LABS server block answered: /content/labs/** off disk with the per-version isolation
+# headers, everything else a 302 to the site's /labs. The ALB can not rewrite Host; the container nginx names
+# origin-labs.gkoi.com itself (LABS_ORIGIN_HOST, CMS 9d222b28). These rules keep the labs name from serving the whole
+# site: /content/labs/** GET/HEAD is forwarded, any other GET/HEAD gets the labs block's own 302 to the site's Labs
+# page, any other method 403 (prod's `limit_except GET HEAD`).
+# Locked: 208 / 209 forward (secret + the path + GET / HEAD); 210 = secret + the path, another method → 403;
+# 211 = secret + GET/HEAD → the 302; 212 = everything else (no secret included) → 403.
+resource "aws_lb_listener_rule" "cms_labs_locked" {
+  for_each     = local.cms_labs_locked
+  listener_arn = aws_lb_listener.https.arn
+  priority     = each.value
 
   action {
     type             = "forward"
@@ -460,11 +603,65 @@ resource "aws_lb_listener_rule" "cms_labs" {
     host_header { values = [local.cms_labs_fqdn] }
   }
   condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = local.site_secrets
+    }
+  }
+  condition {
     path_pattern { values = ["/content/labs/*"] }
   }
   condition {
-    http_request_method { values = ["GET", "HEAD"] }
+    http_request_method { values = [each.key] }
   }
+}
+
+resource "aws_lb_listener_rule" "cms_labs" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 210
+
+  dynamic "action" {
+    for_each = local.site_lock ? [] : [1]
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.svc["cms"].arn
+    }
+  }
+  dynamic "action" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      type = "fixed-response"
+      fixed_response {
+        content_type = local.forbidden_text.content_type
+        status_code  = local.forbidden_text.status_code
+        message_body = local.forbidden_text.message_body
+      }
+    }
+  }
+
+  condition {
+    host_header { values = [local.cms_labs_fqdn] }
+  }
+  dynamic "condition" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = local.site_secrets
+      }
+    }
+  }
+  condition {
+    path_pattern { values = ["/content/labs/*"] }
+  }
+  dynamic "condition" {
+    for_each = local.site_lock ? [] : [1]
+    content {
+      http_request_method { values = ["GET", "HEAD"] }
+    }
+  }
+
+  depends_on = [aws_lb_listener_rule.cms_labs_locked]
 
   lifecycle {
     precondition {
@@ -492,6 +689,15 @@ resource "aws_lb_listener_rule" "cms_labs_to_site" {
   condition {
     host_header { values = [local.cms_labs_fqdn] }
   }
+  dynamic "condition" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = local.site_secrets
+      }
+    }
+  }
   condition {
     http_request_method { values = ["GET", "HEAD"] }
   }
@@ -515,8 +721,9 @@ resource "aws_lb_listener_rule" "cms_labs_method" {
   }
 }
 
-# The apex (gkoi.com): prod's 443 server `server_name gkoi.com; return 301 https://www.gkoi.com$request_uri;`. Only
-# reached once the apex record points at this ALB (today it is the Lightsail site box's address).
+# The apex (gkoi.com): the old host nginx's 443 server `server_name gkoi.com; return 301 https://www.gkoi.com$request_uri;`.
+# The apex A record is an alias to this ALB since the P4 window (2026-11-11) — reached DIRECTLY, by design (no CDN):
+# it only ever answers this redirect, so the site-origin lock does not apply to it.
 resource "aws_lb_listener_rule" "apex_redirect" {
   count        = var.apex_redirect ? 1 : 0
   listener_arn = aws_lb_listener.https.arn
@@ -539,8 +746,40 @@ resource "aws_lb_listener_rule" "apex_redirect" {
   }
 }
 
+# The site-origin lock's ONE door that stays open without the secret (var.cms_origin_open_paths, on origin-www only):
+# the build boxes' upload API. `POST /api/v1/downloads/:app/:platform` streams installers of up to 4 GiB for many
+# minutes, which the publish CLIs send to origin-www on purpose (SPEC-PAGE-SPEED-V1: not through CloudFront); the same
+# CLI run reads its submission at /api/v1/app-updates/**. Every route there checks its own credential (a publisher key,
+# `Authorization: Bearer dl_…`), and the callers are other boxes (the Mac, the Windows VM) that must not hold the
+# origin secret. Empty list = no door.
+resource "aws_lb_listener_rule" "cms_origin_open" {
+  count        = local.site_lock && length(var.cms_origin_open_paths) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 228
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.svc["cms"].arn
+  }
+
+  condition {
+    host_header { values = [local.site_origin_fqdn] }
+  }
+  condition {
+    path_pattern { values = var.cms_origin_open_paths }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = contains(local.cms_open_fqdns, local.site_origin_fqdn)
+      error_message = "cms_site_origin_host must be one of services.cms.hosts (and not the cdn / labs origin)."
+    }
+  }
+}
+
 # origin-www (CloudFront www.gkoi.com's /assets, /content, /favicon*, /apple-touch-icon* behaviours, Host =
 # origin-www.gkoi.com) and www.gkoi.com (its default behaviour forwards the viewer's Host, B4-2): the whole site.
+# Locked: only with the secret (both Host values: CloudFront sends either); 231 = everything else → 403.
 resource "aws_lb_listener_rule" "cms" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 230
@@ -553,21 +792,51 @@ resource "aws_lb_listener_rule" "cms" {
   condition {
     host_header { values = local.cms_open_fqdns }
   }
+  dynamic "condition" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = local.site_secrets
+      }
+    }
+  }
+
+  depends_on = [aws_lb_listener_rule.cms_origin_open]
 
   lifecycle {
     precondition {
       condition     = length(local.cms_open_fqdns) >= 1 && length(local.cms_open_fqdns) <= 3
-      error_message = "The cms hosts other than the cdn / labs origins must be 1–3 (an ALB condition takes at most 3 values)."
+      error_message = "The cms hosts other than the cdn / labs origins must be 1–3 (an ALB condition takes at most 3 values; with the site-origin lock: hosts + 2 secret values ≤ 5)."
     }
   }
 }
 
+resource "aws_lb_listener_rule" "cms_forbidden" {
+  count        = local.site_lock ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 231
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = local.forbidden_text.content_type
+      status_code  = local.forbidden_text.status_code
+      message_body = local.forbidden_text.message_body
+    }
+  }
+
+  condition {
+    host_header { values = local.cms_open_fqdns }
+  }
+}
+
 # --- files (priorities 300–3xx) — audit 2026-11-11 B3-6 -----------------------------------------------------------
-# Prod's public file-manager listener (gkoi-beta-core sites-enabled/files.gkoi.com, from filemanager
+# The old public file-manager listener (the Lightsail core box gkoi-beta-core, retired 2026-11-17: sites-enabled/files.gkoi.com, from filemanager
 # infra/nginx/fm-proxy.conf.example) is an ALLOW-LIST: /api/v1/app/**, /thumbs/**, /api/v1/healthz, /api/v1/readyz;
 # everything else (admin, auth incl. the one-shot register, devices, /me) 404. The CMS (and the engine pilot) used a
 # PRIVATE listener (172.26.7.222:3210) open to the site box only. Here: the public paths for everyone, every other path
-# only from var.cms_source_cidrs (the Lightsail site box, then the NAT every ECS task leaves by), else 404.
+# only from var.cms_source_cidrs (the NAT every ECS task leaves by), else 404.
 # (cdn.gkoi.com's /thumbs/* behaviour uses files.gkoi.com as its origin — /thumbs/* is public on purpose.)
 resource "aws_lb_listener_rule" "files_public" {
   for_each     = local.fm_public_path_groups

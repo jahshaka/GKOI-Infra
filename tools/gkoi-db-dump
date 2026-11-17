@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # gkoi-db-dump: dump ONE app's prod database (read-only) to this box and the db-restore transit bucket.
 #
+# RETIRED 2026-11-17: the default hosts below (gkoi-beta-site / gkoi-beta-core) were the Lightsail servers, deleted that
+# day — their addresses may belong to someone else now, so the tool REFUSES to run without an explicit
+# GKOI_DB_DUMP_HOST (a box that runs the database in a compose postgres container, e.g. the dev box). Prod's databases
+# are on RDS: use an RDS snapshot, or GKOIBuilder_AI's scripts/session-tools/prod-psql.sh for SQL.
+#
 #   gkoi-db-dump <cms|engine|fm> [--out DIR] [--no-upload] [--check]
 #
 #   --out DIR     where the dump + .sha256 land (default ~/.local/share/gkoi-db-dumps, 0700; files 0600)
@@ -24,7 +29,7 @@ GKOI_TOOL=gkoi-db-dump
 # shellcheck source=lib/gkoi-tools.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -ge 1 ] || usage
 APP="$1"; shift
 OUT="${GKOI_DB_DUMP_DIR:-$HOME/.local/share/gkoi-db-dumps}" UPLOAD=1 CHECK=0
@@ -44,6 +49,7 @@ case "$APP" in
   -h|--help) usage ;;
   *) die "app must be cms, engine or fm (got '$APP')" ;;
 esac
+[ -n "${GKOI_DB_DUMP_HOST:-}" ] || die "the default host $HOST was a Lightsail server, RETIRED on 2026-11-17 (its address may belong to someone else now). Prod runs on RDS. To dump from another compose box, name it: GKOI_DB_DUMP_HOST=<ssh alias>"
 HOST="${GKOI_DB_DUMP_HOST:-$HOST}" PROJECT="${GKOI_DB_DUMP_PROJECT:-$PROJECT}" SERVICE="${GKOI_DB_DUMP_SERVICE:-$SERVICE}"
 BUCKET="${GKOI_DB_TRANSIT_BUCKET:-gkoi-prod2-db-transit-$GKOI_ACCOUNT}"
 for v in "$PROJECT" "$SERVICE"; do [[ "$v" =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "bad compose name '$v'"; done

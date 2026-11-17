@@ -71,7 +71,7 @@ variable "origin_ingress_cidrs" {
 }
 
 variable "origin_open_to_world" {
-  description = "true = 443 from 0.0.0.0/0 (the Lightsail box's rule; the X-Origin-Verify lock is then the only gate)."
+  description = "true = 443 from 0.0.0.0/0 (the retired Lightsail box's rule; the X-Origin-Verify lock is then the only gate)."
   type        = bool
 }
 

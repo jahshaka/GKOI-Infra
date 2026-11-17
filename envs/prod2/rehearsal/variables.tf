@@ -28,7 +28,7 @@ variable "task_size" {
 }
 
 variable "engine_url" {
-  description = "The engine's public name (TLS SNI + Host). The driver CONNECTS to edge-alb's ALB instead (engine.gkoi.com's DNS still names Lightsail until the window)."
+  description = "The engine's public name (TLS SNI + Host). The driver CONNECTS to edge-alb's ALB instead (written before the 2026-11-11 window, when engine.gkoi.com's DNS still named the Lightsail box — retired 2026-11-17; the name is the ALB now)."
   type        = string
   default     = "https://engine.gkoi.com"
 }

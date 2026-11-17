@@ -4,8 +4,8 @@
 # then data + edge-alb (they admit the new edge CIDR) (README "Enabling a paused region"). Tokyo (apne1) was enabled 2026-11-11 for a
 # media box only (envs/prod2/media/README.md "Adding Tokyo (apne1)"); its game box stays off in envs/prod2/game.
 #
-# CIDRs are 10.x on purpose: Lightsail's own VPC in us-west-2 / eu-central-1 is 172.26.0.0/16 (peered to the
-# default VPC) and the dev box's Docker uses 172.16–172.31.
+# CIDRs are 10.x on purpose: Lightsail's own VPC in us-west-2 / eu-central-1 was 172.26.0.0/16 (peered to the
+# default VPC; the Lightsail servers were retired 2026-11-17) and the dev box's Docker uses 172.16–172.31.
 
 locals {
   all = {

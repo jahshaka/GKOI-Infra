@@ -9,7 +9,7 @@ locals {
     cms = {
       repos   = ["cms-server", "cms-nginx"]
       logs    = ["cms-server", "cms-nginx", "cms-migrate"]
-      secrets = concat([for k in distinct(concat(values(var.cms_server_secret_env), values(var.cms_nginx_secret_env))) : local.secret_arn[k]], [local.secret_arn["cms/CONTENT_SYNC_SSH_KEY"]])
+      secrets = [for k in distinct(concat(values(var.cms_server_secret_env), values(var.cms_nginx_secret_env))) : local.secret_arn[k]]
     }
     engine = {
       repos   = ["engine-api", "engine-worker", "engine-edge"]

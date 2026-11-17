@@ -19,7 +19,7 @@ Per enabled region (`modules/media-box`, in that region):
 | Launch template | Canonical Ubuntu 24.04 amd64 (SSM public parameter), `m7i.xlarge` (plan §1: 4 vCPU / 16 GiB, x86 — the images are amd64), gp3 100 GiB encrypted, IMDSv2 only with **hop limit 2** (the agent's S3 client uses the instance role from inside its container), public IP at launch, user-data = only the config parameter's name |
 | Elastic IP | stable address for DNS; the box associates it to itself at boot (`phase eip`) |
 | SG `gkoi-prod2-media-<key>` | public: RTMPS tcp 11936 / 21936, WebRTC ICE udp 8189 / 8289 (per pool); private: HLS 18888/28888, WHIP/WHEP 18889/28889, control API 19997/29997 from the engine only (home: the ECS tasks SG; spokes: the home VPC CIDR over peering). NOT open: plain RTMP 11935/21935, 22, 80 — exactly the live Lightsail firewall minus its stray 22/80 |
-| SG `…-origin` | 443 from CloudFront's origin-facing prefix list (its own SG: the list weighs ~55 rules); `origin_ingress_cidrs` for a tester; `origin_open_to_world` = the Lightsail rule |
+| SG `…-origin` | 443 from CloudFront's origin-facing prefix list (its own SG: the list weighs ~55 rules); `origin_ingress_cidrs` for a tester; `origin_open_to_world` = the retired Lightsail box's rule |
 | IAM role + profile `/gkoi/gkoi-prod2-media-<key>` | SSM core + CloudWatch agent (managed); ECR pull of `gkoi/{media-agent,mediamtx,media-origin}` in its region; `GetSecretValue` on exactly the 5 engine secrets + its region's origin-verify; its own SSM parameter; S3 GET on the box bundle + `mikaido/*/source.zip`; the recordings bucket (the engine task role's object set); `AssociateAddress` on its own EIP (tag-conditioned); its own ASG's lifecycle calls; Route 53 TXT `_acme-challenge.<its 4 names>` only |
 | SSM `/gkoi/prod2/media/<key>/config` | the box's whole configuration (no secret values: secrets are named by ARN) |
 | Route 53 | A records (TTL 60) → the EIP for the two **rehearsal** names; the two **live** names only with `manage_live_records` (allow_overwrite + `prevent_destroy`) |
@@ -159,6 +159,10 @@ fine; all three regions must print the same digest.)
 
 ## The window (engine + FM + media, nobody live)
 
+> **HISTORY — done on 2026-11-11.** The Lightsail servers this section moves away from were RETIRED on 2026-11-17
+> (servers and static IPs deleted; `34.212.239.200` and the other old addresses may belong to someone else now).
+> Kept as the record of what was done. Do NOT point any record at those addresses and do not try to reach those hosts.
+
 Before: lower nothing (the four live records are TTL 300 already — wait ≥ 5 min after each flip); have the Lightsail IPs
 for the rollback (stream.gkoi.com + origin-live-usw2 → `34.212.239.200`, stream-euc1 + origin-live-euc1 → `63.179.228.39`).
 
@@ -181,7 +185,9 @@ for the rollback (stream.gkoi.com + origin-live-usw2 → `34.212.239.200`, strea
 
 - **Before the window** (rehearsal): set `enabled = false` and apply — everything of that region goes (the rehearsal
   names included). Nothing live is touched.
-- **In / after the window** (back to Lightsail): the engine itself must go back too (P3's DNS rollback) — the Lightsail
+- **In / after the window** (back to Lightsail) — **NO LONGER POSSIBLE since 2026-11-17: the Lightsail servers and
+  their addresses are gone; a bad change is rolled back inside AWS (a release revert, below).** The record of the
+  old path: the engine itself must go back too (P3's DNS rollback) — the Lightsail
   agents only work against the Lightsail Redis. Then: (1) UPSERT the four live A records to the Lightsail IPs above
   (Route 53 console/CLI); (2) CloudFront origin headers back to the old values; (3) `terraform state rm
   'module.box_<key>[0].aws_route53_record.live["<name>"]'` for each live name; (4) `manage_live_records = false`,
@@ -496,7 +502,7 @@ count, the live-records switch, the rehearsal switch; the runs share one state, 
 Once (in edge-alb): the internal ALB ~$16.4 + LCUs (~$5) ≈ **$22**. All three ≈ **$540/month** (+ egress: platform relays
 $0.09/GB ≈ $0.24 per platform per stream-hour at 6 Mb/s; a spoke's recording upload to the us-west-2 bucket and its
 Valkey/API traffic cross peering at $0.02/GB — ≈ $0.05 per recorded stream-hour; EC2 → CloudFront is free). The plan
-budgeted ~$650 for four regions incl. Tokyo. The live Lightsail boxes are 8 vCPU / 32 GB (`2xlarge_3_0`): the 4/16 box
+budgeted ~$650 for four regions incl. Tokyo. The Lightsail boxes (retired 2026-11-17) were 8 vCPU / 32 GB (`2xlarge_3_0`): the 4/16 box
 is the plan's size, unproven by a capacity test (plan §5.5) — watch the CPU alarm; `instance_type` per region resizes.
 
 ## Assumptions and open questions
@@ -504,7 +510,7 @@ is the plan's size, unproven by a capacity test (plan §5.5) — watch the CPU a
 1. **Done in this branch** (were open): compute registers engine-api in the internal TG; the engine env is
    registry-only with no static list; data admits the spoke VPCs to Valkey; nginx comes from our ECR. Left: whether
    step 4 replaces the engine-api service (read the plan).
-2. **The rollback to Lightsail** needs the Lightsail list back in compute (`engine_env = { RELAY_POOL_INSTANCES = … }`
+2. **The rollback to Lightsail** (moot since 2026-11-17 — the servers are retired) needed the Lightsail list back in compute (`engine_env = { RELAY_POOL_INSTANCES = … }`
    + `RELAY_REGISTRY_ONLY` off) only if the ECS engine should drive the Lightsail boxes — it cannot (no route); the
    real rollback is P3's DNS flip back to the Lightsail engine.
 3. **No engine code change found necessary.** Checked in the code at the release commit f997524: the agent boots with
@@ -517,7 +523,7 @@ is the plan's size, unproven by a capacity test (plan §5.5) — watch the CPU a
    G4 measured Frankfurt → Oregon at ~143 ms RTT per call (the publish-auth on every publish, every heartbeat, the
    BullMQ round trips to Valkey); G6's keep-alive (set) removes the extra ~145 ms of a fresh TLS handshake. That
    distance stays for euc1 (and ~65 ms for use1) until G5. **G3** (noeviction) is the data stack's parameter group.
-5. **Frankfurt's live bucket:** every box writes `gkoi-beta-vods` (us-west-2), as the Lightsail boxes do (only
+5. **Frankfurt's live bucket:** every box writes `gkoi-beta-vods` (us-west-2), as the Lightsail boxes did (only
    Oregon's env was read — the Frankfurt box's `S3_BUCKET` was not checked; per-region buckets (C6) are not created).
 6. **Valkey from the spokes** admits whole VPC CIDRs (10.20/16, 10.30/16): the game boxes there could connect too;
    the TLS auth token still gates every connection. Narrow to the media SG's subnets if wanted.
@@ -525,7 +531,8 @@ is the plan's size, unproven by a capacity test (plan §5.5) — watch the CPU a
    any) must let the box roles GET `gkoi-infra/media-box/*` + `mikaido/*/source.zip` — neither policy was read.
 8. **origin-verify secrets** — values not read (by design). The P5 rotation means CloudFront's headers change in the
    window (step 4). A value outside `[A-Za-z0-9_-]{32,128}` makes the origin container refuse to start.
-9. **Certs:** the new box issues `stream.gkoi.com` / `stream-euc1` / `origin-live-*` while the Lightsail boxes still
+9. **Certs:** the new box issues `stream.gkoi.com` / `stream-euc1` / `origin-live-*` while the Lightsail boxes (retired
+   2026-11-17) still
    renew theirs by DNS-01 on the same `_acme-challenge` names — a renewal colliding in the same minute fails once and
    retries (twice-daily timers). Let's Encrypt's duplicate-cert limit (5/week/name) allows ~2 box replacements a week
    per region; a third needs `acme_staging` or a wait.

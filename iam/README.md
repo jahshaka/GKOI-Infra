@@ -20,3 +20,15 @@ aws iam put-role-policy --role-name gkoi-orchestrator --policy-name gkoi-orchest
 # check from the dev box (should print the run config JSON, no AccessDenied):
 gkoi-aws ssm get-parameter --name /gkoi/prod2/ops/psql-run-config --query Parameter.Value --output text
 ```
+
+- `gkoi-orchestrator-origin-lock.json` — `secretsmanager:GetSecretValue` on the ONE secret `gkoi/prod2/edge/site-origin`
+  (edge-alb's site-origin lock, README "The site-origin lock"). `tools/gkoi-origin-header push` (a rotation's third
+  step, or a repair) and the "with the header" proof `curl` need to read it. NOT needed for the first roll-out:
+  `gkoi-origin-header set` makes the value, stores it (the role's existing `PutSecretValue` on `gkoi/prod2/*`) and sets it
+  on CloudFront (its existing `cloudfront:UpdateDistribution`) in one run, without reading it back. Attach it after
+  edge-alb created the secret:
+
+```bash
+aws iam put-role-policy --role-name gkoi-orchestrator --policy-name gkoi-orchestrator-origin-lock \
+  --policy-document file://iam/gkoi-orchestrator-origin-lock.json
+```
