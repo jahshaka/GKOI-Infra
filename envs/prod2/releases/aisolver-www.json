@@ -1,18 +1,18 @@
 {
-  "built_at": "2026-11-17T15:42:28Z",
-  "codebuild_build_id": "gkoi-build-aisolver-www:95c6c88e-4a87-45e8-9c51-dca6a6279042",
-  "commit": "7799e7ebfeb5367da1e3fdaa97162bd8e3df900c",
+  "built_at": "2026-11-17T17:31:24Z",
+  "codebuild_build_id": "gkoi-build-aisolver-www:94536355-2267-4912-9979-1d304ca1a066",
+  "commit": "56a65e568a209c75634c472f21773242ea3beea0",
   "images": {
     "cms-nginx": {
-      "digest": "sha256:1464db8c39f467cca659457c7c9e0e9d2178ea7a2c93b5a1ef7fac571b56d3f9",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/cms-nginx@sha256:1464db8c39f467cca659457c7c9e0e9d2178ea7a2c93b5a1ef7fac571b56d3f9"
+      "digest": "sha256:cbae4b94a44e91e1c33e6284e3e696fed3f7bfa925886926a36f899395bf9c58",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/cms-nginx@sha256:cbae4b94a44e91e1c33e6284e3e696fed3f7bfa925886926a36f899395bf9c58"
     },
     "cms-server": {
-      "digest": "sha256:61a44fa0b00aa2c56708b76619d671c52296cd3aa61a16178da52e0da3502ce8",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/cms-server@sha256:61a44fa0b00aa2c56708b76619d671c52296cd3aa61a16178da52e0da3502ce8"
+      "digest": "sha256:a447bfadf54de9ae1708e8d4591001df2c850e5f44e65fc8cec7db674b0e902c",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/cms-server@sha256:a447bfadf54de9ae1708e8d4591001df2c850e5f44e65fc8cec7db674b0e902c"
     }
   },
   "repo": "aisolver-www",
-  "source_sha256": "bc1d5cb75f1269c7cfef25e2285a0dd110237c6cfa3c9fcb4794670ad8ff0830",
-  "tag": "gkoi-2026.11.17-1"
+  "source_sha256": "30f9dfbe41a616eb7e42e09ba9fe6277c658e511e4bc368a1b11abfbb7529873",
+  "tag": "gkoi-2026.11.17-2"
 }
