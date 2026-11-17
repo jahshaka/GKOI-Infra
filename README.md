@@ -83,6 +83,7 @@ distribution adds as an origin custom header; everything else on those hosts is 
 | 196–199 | origin-cdn | secret + one of `/content/*` `/assets/*` + GET or HEAD | → cms |
 | 200 / 201 | origin-cdn | those paths: secret + another method / no secret | 403 |
 | 202 / 203 | origin-cdn | another path with the secret / everything else | 404 / 403 |
+| 207 | origin-labs | `/robots.txt` + the secret (lock off: + GET/HEAD, no secret) | 200 `User-agent: *` / `Disallow: /` (the ALB's own answer, both lock states) |
 | 208–209 | origin-labs | secret + `/content/labs/*` + GET or HEAD | → cms |
 | 210 | origin-labs | secret + that path, another method | 403 |
 | 211 / 212 | origin-labs | secret + GET/HEAD / everything else | 302 → www/labs / 403 |
@@ -91,7 +92,8 @@ distribution adds as an origin custom header; everything else on those hosts is 
 | 230 / 231 | www, origin-www | secret / everything else | → cms / 403 |
 
 The whole listener, one line per priority, is the output `listener_rule_table`; `envs/prod2/edge-alb/tests/` pins it for
-lock off (today's 18 rules), lock on (27) and a rotation (27, two accepted values, no rule above 5 condition values).
+lock off (the 18 rules live on 2026-11-17 + 207, the labs robots.txt = 19), lock on (28) and a rotation (28, two
+accepted values, no rule above 5 condition values).
 `tools/tf-run.sh` runs those tests before every edge-alb plan / apply (a failure = exit 4, no plan).
 
 - **Which Host CloudFront sends:** www's default behaviour forwards the viewer's Host (`www.gkoi.com`, the managed
@@ -122,6 +124,13 @@ lock off (today's 18 rules), lock on (27) and a rotation (27, two accepted value
   that is not `Deployed` (`data.aws_cloudfront_distribution.site`, `cloudfront:GetDistribution` — the runner's
   PowerUserAccess has it). It can NOT see whether the header's VALUE is the secret's: that is
   `tools/gkoi-origin-header check` (exit 0 only when all three send the same value and it is the secret's).
+- **labs.gkoi.com keeps crawlers out (owner 2026-11-17: the host is for embedding in the site only).** Rule 207 answers
+  `/robots.txt` itself. CloudFront labs serves it through its default behaviour (origin-labs, Host
+  `origin-labs.gkoi.com`, GET/HEAD/OPTIONS, cache policy `gkoi-labs-cc-qs`: no `Cache-Control` from the ALB → kept for
+  the default 24 h). After the first apply, invalidate the cached 302 once:
+  `gkoi-aws cloudfront create-invalidation --distribution-id E28154TBILFIGK --paths /robots.txt`. The build files
+  themselves carry no `X-Robots-Tag` — that belongs in the CMS nginx labs block or a CloudFront response-headers policy
+  (neither is in this repo).
 - **Health checks** are not affected: a target group's health check goes from the ALB nodes straight to the task,
   never through a listener rule. The Route 53 health check on `www.gkoi.com` goes through CloudFront.
 
@@ -129,13 +138,14 @@ Roll-out (each step is safe on its own; nothing is refused before step 5):
 
 0. Operator, once: attach `iam/gkoi-orchestrator-origin-lock.json` to `gkoi-orchestrator` (iam/README.md) — the tool
    reads the secret back and compares it with CloudFront; without it `set` and `check` refuse.
-1. `gkoi-infra-run edge-alb apply` with `site_origin_lock = false` (the default): creates the EMPTY secret; no rule
-   changes. Roll-back: none needed (an unused secret).
+1. `gkoi-infra-run edge-alb apply` with `site_origin_lock = false` (the default): creates the EMPTY secret and rule
+   207 (the labs robots.txt); no other rule changes. Then the `/robots.txt` invalidation above;
+   `curl -s https://labs.gkoi.com/robots.txt` → the two lines. Roll-back: none needed (an unused secret).
 2. `tools/gkoi-origin-header set` — makes the value, stores it, reads it back, sets the header on the three
    distributions (harmless: the ALB ignores it), waits until they are Deployed. Roll-back: `tools/gkoi-origin-header remove`.
 3. `tools/gkoi-origin-header check` → must END with `READY for site_origin_lock = true` and exit 0.
 4. Commit `site_origin_lock = true` (variables.tf default), `gkoi-infra-run edge-alb plan` — read it: it must show only
-   listener rules (9 to create, 5 to update in place, nothing destroyed).
+   listener rules (9 to create, 6 to update in place — the five forwards / answers and 207, nothing destroyed).
 5. `gkoi-infra-run edge-alb apply`. The new allow rules are created before the old ones change (depends_on). Verify —
    each line is one check, the expected answer after `→`:
    ```
@@ -144,6 +154,8 @@ Roll-out (each step is safe on its own; nothing is refused before step 5):
    c https://www.gkoi.com/                                        # → 200 text/html             (through CloudFront)
    c https://cdn.gkoi.com$A                                       # → 200
    c https://labs.gkoi.com$B                                      # → 200
+   c https://labs.gkoi.com/robots.txt                             # → 200 text/plain            (User-agent: * / Disallow: /)
+   c https://origin-labs.gkoi.com/robots.txt                      # → 403 text/plain            (direct: refused)
    c -X POST https://www.gkoi.com/api/v1/devices/mint             # → the APP's answer (401, application/json) — NOT "403 text/plain"
    c https://origin-www.gkoi.com/                                 # → 403 text/plain            (direct: refused)
    c --resolve www.gkoi.com:443:"$(dig +short origin-www.gkoi.com | head -1)" https://www.gkoi.com/   # → 403 text/plain
@@ -156,7 +168,7 @@ Roll-out (each step is safe on its own; nothing is refused before step 5):
    c -X POST https://origin-www.gkoi.com/api/v1/downloads/gkoi-live/macos   # → the APP's 401 application/json (the door: no key)
    c https://origin-www.gkoi.com/api/v1/app-updates/tool/info     # → 200 application/json      (the door)
    ```
-   Roll-back: commit `site_origin_lock = false`, `gkoi-infra-run edge-alb apply --allow-destroy --yes` (5 in place, 9
+   Roll-back: commit `site_origin_lock = false`, `gkoi-infra-run edge-alb apply --allow-destroy --yes` (6 in place, 9
    destroyed; a commit + a CodeBuild run, a few minutes).
 
 **Emergency unlock (the site answers 403 and it cannot wait for a run).** Three `modify-rule` calls put the three

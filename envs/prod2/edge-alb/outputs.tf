@@ -62,6 +62,7 @@ locals {
     values(aws_lb_listener_rule.cms_cdn_locked),
     [aws_lb_listener_rule.cms_cdn, aws_lb_listener_rule.cms_cdn_method, aws_lb_listener_rule.cms_cdn_other],
     aws_lb_listener_rule.cms_cdn_forbidden,
+    [aws_lb_listener_rule.cms_labs_robots],
     values(aws_lb_listener_rule.cms_labs_locked),
     [aws_lb_listener_rule.cms_labs, aws_lb_listener_rule.cms_labs_to_site, aws_lb_listener_rule.cms_labs_method],
     aws_lb_listener_rule.apex_redirect,

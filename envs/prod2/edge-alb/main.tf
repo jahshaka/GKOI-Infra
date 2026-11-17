@@ -607,8 +607,50 @@ resource "aws_lb_listener_rule" "cms_cdn_forbidden" {
 # origin-labs.gkoi.com itself (LABS_ORIGIN_HOST, CMS 9d222b28). These rules keep the labs name from serving the whole
 # site: /content/labs/** GET/HEAD is forwarded, any other GET/HEAD gets the labs block's own 302 to the site's Labs
 # page, any other method 403 (prod's `limit_except GET HEAD`).
-# Locked: 208 / 209 forward (secret + the path + GET / HEAD); 210 = secret + the path, another method → 403;
+# Locked: 207 = secret + /robots.txt → the keep-out robots file; 208 / 209 forward (secret + the path + GET / HEAD);
+# 210 = secret + the path, another method → 403;
 # 211 = secret + GET/HEAD → the 302; 212 = everything else (no secret included) → 403.
+# labs.gkoi.com is for embedding in the site only (owner, 2026-11-17): crawlers are told to keep out. Without this rule
+# /robots.txt got rule 211's 302 to the site's /labs like every other path, i.e. no robots file for the host. Answered
+# by the ALB itself (the CMS never sees it), in BOTH lock states: lock off = host + path + GET/HEAD; lock on = host +
+# path + the secret (1 + 1 + 2 secret values = 4 — the method condition is dropped to stay within 5: only CloudFront
+# reaches it then, and the labs distribution allows GET / HEAD / OPTIONS), a request without the secret falls to 212's 403.
+resource "aws_lb_listener_rule" "cms_labs_robots" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 207
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      status_code  = "200"
+      message_body = "User-agent: *\nDisallow: /\n"
+    }
+  }
+
+  condition {
+    host_header { values = [local.cms_labs_fqdn] }
+  }
+  condition {
+    path_pattern { values = ["/robots.txt"] }
+  }
+  dynamic "condition" {
+    for_each = local.site_lock ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = local.site_secrets
+      }
+    }
+  }
+  dynamic "condition" {
+    for_each = local.site_lock ? [] : [1]
+    content {
+      http_request_method { values = ["GET", "HEAD"] }
+    }
+  }
+}
+
 resource "aws_lb_listener_rule" "cms_labs_locked" {
   for_each     = local.cms_labs_locked
   listener_arn = aws_lb_listener.https.arn

@@ -102,7 +102,8 @@ variables {
   create_engine_internal_alb = false
 }
 
-# Lock off (the default): EXACTLY the listener as it is live on 2026-11-17 — 18 rules + the default.
+# Lock off (the default): the listener as it is live on 2026-11-17 (18 rules + the default) PLUS ONE: 207, the labs
+# host's keep-out robots.txt (owner 2026-11-17) = 19 rules. Every other line is today's, unchanged.
 run "lock_off_is_todays_table" {
   command = apply
   assert {
@@ -115,6 +116,7 @@ run "lock_off_is_todays_table" {
       "200" = "host=origin-cdn.gkoi.com path=/assets/*,/content/* method=GET,HEAD => forward:cms"
       "201" = "host=origin-cdn.gkoi.com path=/assets/*,/content/* => fixed:403"
       "202" = "host=origin-cdn.gkoi.com => fixed:404"
+      "207" = "host=origin-labs.gkoi.com path=/robots.txt method=GET,HEAD => fixed:200"
       "210" = "host=origin-labs.gkoi.com path=/content/labs/* method=GET,HEAD => forward:cms"
       "211" = "host=origin-labs.gkoi.com method=GET,HEAD => redirect:HTTP_302:www.gkoi.com/labs"
       "212" = "host=origin-labs.gkoi.com => fixed:403"
@@ -126,7 +128,11 @@ run "lock_off_is_todays_table" {
       "320" = "host=files.gkoi.com source=32.189.104.202/32 => forward:fm-api"
       "321" = "host=files.gkoi.com => fixed:404"
     }
-    error_message = "lock off must be today's 18 rules, unchanged"
+    error_message = "lock off must be today's 18 rules, unchanged, plus 207 (labs robots.txt)"
+  }
+  assert {
+    condition     = length(output.listener_rule_table) == 19 && aws_lb_listener_rule.cms_labs_robots.action[0].fixed_response[0].message_body == "User-agent: *\nDisallow: /\n" && aws_lb_listener_rule.cms_labs_robots.action[0].fixed_response[0].content_type == "text/plain"
+    error_message = "19 rules; the robots body is exactly the two lines"
   }
   assert {
     condition     = length(data.aws_secretsmanager_secret_version.site_origin) == 0 && length(data.aws_cloudfront_distribution.site) == 0 && output.site_origin_lock.accepted_values == 0
@@ -138,7 +144,7 @@ run "lock_off_is_todays_table" {
   }
 }
 
-# Lock on: 27 rules; every cms forward demands the secret; a 403 closes each host; one door on origin-www.
+# Lock on: 28 rules; every cms forward demands the secret; a 403 closes each host; one door on origin-www.
 run "lock_on" {
   command = apply
   variables {
@@ -159,6 +165,7 @@ run "lock_on" {
       "201" = "host=origin-cdn.gkoi.com path=/assets/*,/content/* => fixed:403"
       "202" = "host=origin-cdn.gkoi.com x-origin-verify×1 => fixed:404"
       "203" = "host=origin-cdn.gkoi.com => fixed:403"
+      "207" = "host=origin-labs.gkoi.com path=/robots.txt x-origin-verify×1 => fixed:200"
       "208" = "host=origin-labs.gkoi.com path=/content/labs/* method=GET x-origin-verify×1 => forward:cms"
       "209" = "host=origin-labs.gkoi.com path=/content/labs/* method=HEAD x-origin-verify×1 => forward:cms"
       "210" = "host=origin-labs.gkoi.com path=/content/labs/* x-origin-verify×1 => fixed:403"
@@ -174,7 +181,11 @@ run "lock_on" {
       "320" = "host=files.gkoi.com source=32.189.104.202/32 => forward:fm-api"
       "321" = "host=files.gkoi.com => fixed:404"
     }
-    error_message = "lock on: the 27-rule table"
+    error_message = "lock on: the 28-rule table"
+  }
+  assert {
+    condition     = length(output.listener_rule_table) == 28
+    error_message = "28 rules with the lock on"
   }
   assert {
     condition     = output.site_origin_lock.accepted_values == 1 && output.listener_rule_max_values <= 5
@@ -214,6 +225,7 @@ run "lock_on_with_a_pending_value" {
       "201" = "host=origin-cdn.gkoi.com path=/assets/*,/content/* => fixed:403"
       "202" = "host=origin-cdn.gkoi.com x-origin-verify×2 => fixed:404"
       "203" = "host=origin-cdn.gkoi.com => fixed:403"
+      "207" = "host=origin-labs.gkoi.com path=/robots.txt x-origin-verify×2 => fixed:200"
       "208" = "host=origin-labs.gkoi.com path=/content/labs/* method=GET x-origin-verify×2 => forward:cms"
       "209" = "host=origin-labs.gkoi.com path=/content/labs/* method=HEAD x-origin-verify×2 => forward:cms"
       "210" = "host=origin-labs.gkoi.com path=/content/labs/* x-origin-verify×2 => fixed:403"
@@ -229,7 +241,7 @@ run "lock_on_with_a_pending_value" {
       "320" = "host=files.gkoi.com source=32.189.104.202/32 => forward:fm-api"
       "321" = "host=files.gkoi.com => fixed:404"
     }
-    error_message = "rotation: the same 27 rules, two accepted values each"
+    error_message = "rotation: the same 28 rules, two accepted values each"
   }
   assert {
     condition     = output.site_origin_lock.accepted_values == 2 && output.listener_rule_max_values == 5
