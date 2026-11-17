@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# A tiny stand-in for gkoi-aws (state in $FAKE_STATE): just enough of secretsmanager / cloudfront / elbv2 for the tool.
+import json, os, sys, uuid
+st_path = os.environ["FAKE_STATE"]
+st = json.load(open(st_path))
+a = sys.argv[1:]
+def opt(n, d=None):
+    return a[a.index(n) + 1] if n in a else d
+def out(v):
+    if opt("--output") == "text":
+        print("None" if v is None else v)
+    else:
+        print(json.dumps(v))
+def save(): json.dump(st, open(st_path, "w"))
+svc, op = a[0], a[1]
+q = opt("--query", "")
+if svc == "secretsmanager":
+    vs = st["versions"]  # id -> {"value":..., "stages":[...]}
+    if op == "put-secret-value":
+        f = opt("--secret-string"); assert f.startswith("file://")
+        val = open(f[7:], newline="").read()
+        if os.environ.get("FAKE_ADD_NEWLINE"): val += "\n"
+        stage = opt("--version-stages", "AWSCURRENT")
+        vid = uuid.uuid4().hex[:8]
+        if stage == "AWSCURRENT":
+            for v in vs.values():
+                if "AWSPREVIOUS" in v["stages"]: v["stages"].remove("AWSPREVIOUS")
+                if "AWSCURRENT" in v["stages"]: v["stages"].remove("AWSCURRENT"); v["stages"].append("AWSPREVIOUS")
+        vs[vid] = {"value": val, "stages": [stage]}
+        save(); out(vid)
+    elif op == "get-secret-value":
+        stage = opt("--version-stage", "AWSCURRENT")
+        m = [v for v in vs.values() if stage in v["stages"]]
+        if not m: sys.stderr.write("An error occurred (ResourceNotFoundException)\n"); sys.exit(254)
+        out("vid" if q == "VersionId" else m[0]["value"])
+    elif op == "list-secret-version-ids":
+        if q == "length(Versions)": out(len(vs))
+        else:
+            stage = q.split("'")[1]
+            m = [k for k, v in vs.items() if stage in v["stages"]]
+            out(m[0] if m else None)
+    elif op == "update-secret-version-stage":
+        stage = opt("--version-stage"); to = opt("--move-to-version-id"); fr = opt("--remove-from-version-id")
+        if fr: vs[fr]["stages"].remove(stage)
+        if to:
+            vs[to]["stages"].append(stage)
+            if stage == "AWSCURRENT" and fr:
+                for v in vs.values():
+                    if "AWSPREVIOUS" in v["stages"]: v["stages"].remove("AWSPREVIOUS")
+                vs[fr]["stages"].append("AWSPREVIOUS")
+        save(); out("x")
+elif svc == "cloudfront":
+    d = st["dists"][opt("--id")]
+    if op == "get-distribution": out(d["status"])
+    elif op == "get-distribution-config": print(json.dumps({"ETag": "E1", "DistributionConfig": d["config"]}))
+    elif op == "update-distribution":
+        assert opt("--if-match") == "E1"
+        d["config"] = json.load(open(opt("--distribution-config")[7:])); save(); out("InProgress")
+    elif op == "wait": pass
+elif svc == "elbv2":
+    if op == "describe-load-balancers": out("lb")
+    elif op == "describe-listeners": out("ls")
+    elif op == "describe-rules": out(1 if q.endswith("'230'])") else st["lock_values"])

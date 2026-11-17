@@ -1,45 +1,58 @@
 #!/usr/bin/env bash
 # gkoi-origin-header: the X-Origin-Verify origin custom header of the SITE's CloudFront distributions (hand-managed —
-# they are not in Terraform) and the secret behind it. README "The site-origin lock" has the order of the roll-out.
+# they are not in Terraform) and the secret behind it. README "The site-origin lock" has the order of every step.
 #
-#   gkoi-origin-header check                 per distribution: Status, and per locked origin: header present? length,
-#                                            fingerprint (the first 8 hex of its sha256 — never the value)
-#   gkoi-origin-header set [--dry-run]       FIRST TIME: make a new random value, put it in the secret, set it on the
-#                                            three distributions' origins. Needs no read access to the secret.
-#   gkoi-origin-header set --no-push         ROTATION step 1: make + put a new value only (the old one becomes AWSPREVIOUS)
-#   gkoi-origin-header push [--dry-run]      ROTATION step 3 / repair: read the secret's CURRENT value and set it on the
-#                                            distributions (needs secretsmanager:GetSecretValue — iam/gkoi-orchestrator-origin-lock.json)
-#   gkoi-origin-header remove [--dry-run]    take the header off the three origins again (roll-back of `set`; ONLY while
-#                                            edge-alb's site_origin_lock is false — with the lock on it takes the site down)
-#   gkoi-origin-header wait                  block until the three distributions are Deployed
+#   gkoi-origin-header check          per distribution: Status, header present? length, fingerprint; the secret's stages'
+#                                     fingerprints; the ALB lock's state. EXIT 0 only when all three are Deployed
+#                                     and send the SAME value and it is the secret's AWSCURRENT (or AWSPENDING).
+#   gkoi-origin-header set            FIRST TIME (lock OFF, no header anywhere): make a value, store it as AWSCURRENT,
+#                                     read it back, set it on the three distributions.
+#   gkoi-origin-header stage          ROTATION 1: make a new value and store it as AWSPENDING (AWSCURRENT — what
+#                                     CloudFront sends — is untouched). Then: edge-alb apply (accepts both).
+#   gkoi-origin-header push           ROTATION 2: set the AWSPENDING value on the distributions (refused unless the ALB
+#                                     already accepts two values) and wait until they are Deployed.
+#   gkoi-origin-header promote        ROTATION 3: AWSPENDING becomes AWSCURRENT (the old one AWSPREVIOUS) — refused
+#                                     unless all three distributions send the pending value and are Deployed.
+#                                     Then: edge-alb apply (the old value stops working).
+#   gkoi-origin-header abort          give a staged value up (refused when CloudFront already sends it)
+#   gkoi-origin-header repair         set the AWSCURRENT value on the distributions again (a half-done `set`)
+#   gkoi-origin-header remove         take the header off the three origins (roll-back of `set`). REFUSED while the ALB
+#                                     lock is on — it would 403 the whole site. Emergency override:
+#                                     --force-while-locked-THE-SITE-WILL-403
+#   gkoi-origin-header wait           block until the three distributions are Deployed
+#   --dry-run (set, stage, push, repair, remove): read, check the guards, say what would be sent; change nothing.
 #
 # What it touches: www E32GUUVFJFZWS7 origin `origin-www.gkoi.com`, cdn E16YQ7HYLBQUPQ origin `origin-cdn.gkoi.com` (NOT
 # its files.gkoi.com origin), labs E28154TBILFIGK origin `origin-labs.gkoi.com` — ONLY the origin's CustomHeaders item
 # named X-Origin-Verify; every other field of the distribution config is sent back exactly as read (If-Match = the
 # ETag just read, so a concurrent change makes the update fail instead of being overwritten).
-# The value is never printed and never on a command line: it lives in 0600 files in a 0700 temp directory that is
-# removed on exit, and every AWS answer that would carry it is discarded (--query).
-# Overrides: GKOI_SITE_ORIGIN_SECRET (default gkoi/prod2/edge/site-origin).
+# The value: 64 characters of [A-Za-z0-9_-], stored with NO trailing newline and read back to prove it. It is never
+# printed and never on a command line: it lives in 0600 files in a 0700 temp directory that is removed on exit, and
+# every AWS answer that would carry it is discarded (--query). A "fingerprint" is the first 8 hex of its sha256.
+# Needs (role gkoi-orchestrator): iam/gkoi-orchestrator-origin-lock.json — attach it BEFORE the first `set`.
+# Overrides: GKOI_SITE_ORIGIN_SECRET (default gkoi/prod2/edge/site-origin), GKOI_ALB_NAME (gkoi-prod2-alb).
 set -euo pipefail
 GKOI_TOOL=gkoi-origin-header
 # shellcheck source=lib/gkoi-tools.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/gkoi-tools.sh"
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -ge 1 ] || usage
 CMD="$1"; shift
-DRY=0 PUSH=1
+DRY=0 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
-    --no-push) PUSH=0; shift ;;
+    --force-while-locked-THE-SITE-WILL-403) FORCE=1; shift ;;
     -h|--help) usage ;;
     *) die "unknown argument $1" ;;
   esac
 done
-case "$CMD" in check|set|push|remove|wait) ;; -h|--help) usage ;; *) die "unknown command '$CMD'" ;; esac
+case "$CMD" in check|set|stage|push|promote|abort|repair|remove|wait) ;; -h|--help) usage ;; *) die "unknown command '$CMD'" ;; esac
 
 SECRET="${GKOI_SITE_ORIGIN_SECRET:-gkoi/prod2/edge/site-origin}"
+ALB_NAME="${GKOI_ALB_NAME:-gkoi-prod2-alb}"
+LOCK_PRIORITY=230 # edge-alb's cms forward rule (www / origin-www): a header condition on it = the lock is on
 HEADER="X-Origin-Verify"
 # name  distribution id  origin domain
 TARGETS=(
@@ -51,6 +64,8 @@ TARGETS=(
 umask 077
 GKOI_WORK="$(mktemp -d "${TMPDIR:-/tmp}/gkoi-origin-header.XXXXXX")"
 trap 'rm -rf "$GKOI_WORK"' EXIT
+
+# ---- CloudFront ------------------------------------------------------------------------------------------------------
 
 status_of() { awsc cloudfront get-distribution --id "$1" --query Distribution.Status --output text; }
 
@@ -77,11 +92,11 @@ else:
 PY
 }
 
-# Write <name>.new.json (the DistributionConfig alone) with the header set to the value in <value file>, or removed.
-# Prints "changed" or "same".
+# Write <name>.new.json (the DistributionConfig alone) with the header set to the EXACT bytes of <value file>, or
+# removed ("-"). Prints "changed" or "same".
 rewrite() { # <name> <origin domain> <value file | ->
   python3 -I - "$GKOI_WORK/$1.json" "$2" "$HEADER" "$3" "$GKOI_WORK/$1.new.json" <<'PY'
-import json, os, sys
+import json, os, re, sys
 src, domain, name, valf, dst = sys.argv[1:6]
 cfg = json.load(open(src))["DistributionConfig"]
 before = json.dumps(cfg, sort_keys=True)
@@ -91,9 +106,9 @@ if len(origins) != 1:
 o = origins[0]
 items = [h for h in (o.get("CustomHeaders") or {}).get("Items") or [] if h["HeaderName"].lower() != name.lower()]
 if valf != "-":
-    value = open(valf).read().strip()
-    if not (32 <= len(value) <= 128) or not all(c.isalnum() or c in "_-" for c in value) or not value.isascii():
-        sys.exit("the value must be 32–128 characters of [A-Za-z0-9_-]")
+    value = open(valf, newline="").read()  # exactly as stored: nothing stripped
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", value):
+        sys.exit("the value is not exactly 32–128 characters of [A-Za-z0-9_-] (whitespace?) — refusing to send it")
     items.append({"HeaderName": name, "HeaderValue": value})
 o["CustomHeaders"] = {"Quantity": len(items), "Items": items} if items else {"Quantity": 0}
 fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -114,59 +129,226 @@ apply_all() { # <value file | ->
     etag="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["ETag"])' "$GKOI_WORK/$name.json")"
     awsc cloudfront update-distribution --id "$id" --if-match "$etag" --distribution-config "file://$name.new.json" \
       --query Distribution.Status --output text >"$GKOI_WORK/$name.status" \
-      || die "$name: update-distribution FAILED (nothing changed on this one; the ones before it WERE updated — run 'check')"
+      || die "$name: update-distribution FAILED (nothing changed on this one; the ones before it WERE updated — run 'check', then the same command again)"
     say "$name $id $domain: updated → $(cat "$GKOI_WORK/$name.status")"
   done
 }
 
-new_value() { python3 -I -c 'import secrets; print(secrets.token_urlsafe(48))' >"$GKOI_WORK/value"; }
+wait_deployed() {
+  local t name id domain
+  for t in "${TARGETS[@]}"; do
+    read -r name id domain <<<"$t"
+    say "waiting for $name $id to be Deployed"
+    awsc cloudfront wait distribution-deployed --id "$id" || die "$name $id did not reach Deployed"
+  done
+  say "all three Deployed"
+}
+
+# Sets CF_<name>_PRESENT / _FP / _STATUS for the three targets, and CF_FPS (the distinct fingerprints, "-" = absent).
+survey() {
+  local t name id domain present len fp st
+  CF_FPS="" CF_ALL_DEPLOYED=1
+  for t in "${TARGETS[@]}"; do
+    read -r name id domain <<<"$t"
+    read_config "$name" "$id"
+    read -r present len fp <<<"$(describe "$name" "$domain")"
+    st="$(status_of "$id")"
+    [ "$st" = Deployed ] || CF_ALL_DEPLOYED=0
+    say "$name $id ($st) origin $domain: $HEADER present=$present length=$len fingerprint=$fp"
+    case " $CF_FPS " in *" $fp "*) ;; *) CF_FPS="${CF_FPS:+$CF_FPS }$fp" ;; esac
+  done
+}
+
+# ---- the secret --------------------------------------------------------------------------------------------------------
+
+# The version id carrying <stage>, or empty. (Labels only — no value.)
+version_of() { # <stage>
+  local v
+  v="$(awsc secretsmanager list-secret-version-ids --secret-id "$SECRET" \
+        --query "Versions[?contains(VersionStages, '$1')].VersionId | [0]" --output text)" \
+    || die "cannot list the versions of $SECRET (does it exist — is edge-alb applied? is iam/gkoi-orchestrator-origin-lock.json attached?)"
+  [ "$v" = None ] && v=""
+  printf '%s' "$v"
+}
+
+# Fetch <stage>'s value into <file> EXACTLY as stored (JSON-decoded, no newline added) and refuse anything but
+# 32–128 characters of [A-Za-z0-9_-]. Prints its fingerprint.
+fetch_value() { # <stage> <file>
+  awsc secretsmanager get-secret-value --secret-id "$SECRET" --version-stage "$1" --query SecretString --output json \
+    >"$GKOI_WORK/raw.json" || die "cannot read $SECRET ($1) — attach iam/gkoi-orchestrator-origin-lock.json to gkoi-orchestrator"
+  python3 -I - "$GKOI_WORK/raw.json" "$2" "$1" <<'PY' || die "the stored $1 value of $SECRET is malformed (see above) — nothing was sent to CloudFront; a malformed AWSPENDING is dropped with 'abort'"
+import hashlib, json, os, re, sys
+v = json.load(open(sys.argv[1]))
+os.unlink(sys.argv[1])
+if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", v):
+    n = len(v) if isinstance(v, str) else -1
+    ws = isinstance(v, str) and v != v.strip()
+    sys.exit(f"{sys.argv[3]}: stored value has length {n}{', with leading/trailing WHITESPACE' if ws else ''} — not exactly 32–128 of [A-Za-z0-9_-]")
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", newline="") as f:
+    f.write(v)
+print(hashlib.sha256(v.encode()).hexdigest()[:8])
+PY
+}
+
+# A new value into <file>: 64 characters, NO newline.
+new_value() { # <file>
+  python3 -I -c 'import os, secrets, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", newline="") as f:
+    f.write(secrets.token_urlsafe(48))' "$1"
+  [ "$(wc -c <"$1")" = 64 ] || die "internal: the new value is not 64 bytes"
+}
+
+# Store <file> under <stage> and prove what is stored is byte for byte what was made.
+store_value() { # <file> <stage>
+  awsc secretsmanager put-secret-value --secret-id "$SECRET" --secret-string "file://$(basename "$1")" \
+    --version-stages "$2" --query VersionId --output text >"$GKOI_WORK/version" \
+    || die "put-secret-value on $SECRET failed (is edge-alb applied — does the secret exist?)"
+  fetch_value "$2" "$GKOI_WORK/readback" >/dev/null
+  cmp -s "$1" "$GKOI_WORK/readback" || die "$SECRET ($2): what is stored differs from what was made — STOP (nothing sent to CloudFront)"
+  say "$SECRET: new value stored as $2 (version $(cat "$GKOI_WORK/version")), read back identical, no whitespace"
+}
+
+# Can the role read the secret at all? (An EMPTY secret answers ResourceNotFoundException — that is fine.)
+need_read_access() {
+  local out
+  if out="$(awsc secretsmanager get-secret-value --secret-id "$SECRET" --query VersionId --output text 2>&1)"; then return 0; fi
+  case "$out" in
+    *AccessDenied*|*"not authorized"*) die "no read access to $SECRET — attach iam/gkoi-orchestrator-origin-lock.json to gkoi-orchestrator first" ;;
+    *ResourceNotFoundException*) return 0 ;;
+    *) die "cannot reach $SECRET: $(printf '%s' "$out" | tail -n1)" ;;
+  esac
+}
+
+# ---- the ALB lock ------------------------------------------------------------------------------------------------------
+
+# Prints how many secret values the ALB's cms forward rule accepts: 0 = the lock is OFF. Counts only (--query): no
+# value is ever fetched into this process.
+lock_values() {
+  local lb ls n rules
+  lb="$(awsc elbv2 describe-load-balancers --names "$ALB_NAME" --query 'LoadBalancers[0].LoadBalancerArn' --output text)" \
+    || die "cannot find the load balancer $ALB_NAME"
+  ls="$(awsc elbv2 describe-listeners --load-balancer-arn "$lb" --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text)" \
+    || die "cannot list the listeners of $ALB_NAME"
+  rules="$(awsc elbv2 describe-rules --listener-arn "$ls" --query "length(Rules[?Priority=='$LOCK_PRIORITY'])" --output text)" \
+    || die "cannot read the rules of $ALB_NAME:443"
+  [ "$rules" = 1 ] || die "expected exactly one rule with priority $LOCK_PRIORITY on $ALB_NAME:443, found $rules — cannot tell whether the lock is on"
+  n="$(awsc elbv2 describe-rules --listener-arn "$ls" \
+        --query "length(Rules[?Priority=='$LOCK_PRIORITY'].Conditions[] | [?Field=='http-header'].HttpHeaderConfig.Values[])" --output text)" \
+    || die "cannot read rule $LOCK_PRIORITY of $ALB_NAME:443"
+  [[ "$n" =~ ^[0-9]+$ ]] || die "unexpected answer '$n' counting the header values of rule $LOCK_PRIORITY"
+  printf '%s' "$n"
+}
+
+# ---- commands ----------------------------------------------------------------------------------------------------------
 
 case "$CMD" in
   check)
-    for t in "${TARGETS[@]}"; do
-      read -r name id domain <<<"$t"
-      read_config "$name" "$id"
-      read -r present len fp <<<"$(describe "$name" "$domain")"
-      say "$name $id ($(status_of "$id")) origin $domain: $HEADER present=$present length=$len fingerprint=$fp"
-    done
-    say "READY for site_origin_lock = true only when: present=yes on all three, the three fingerprints equal, every Status Deployed"
+    rc=0
+    survey
+    LOCK="$(lock_values)"
+    say "ALB $ALB_NAME rule $LOCK_PRIORITY: accepts $LOCK secret value(s) ($([ "$LOCK" = 0 ] && echo 'lock OFF' || echo 'lock ON'))"
+    CUR="" PEN=""
+    if ! awsc secretsmanager list-secret-version-ids --secret-id "$SECRET" --query 'length(Versions)' --output text >/dev/null 2>&1; then
+      say "FAIL: cannot read $SECRET (not created yet — edge-alb not applied — or iam/gkoi-orchestrator-origin-lock.json not attached): the headers can NOT be compared with the secret"
+      [ "$CF_FPS" = "-" ] && [ "$LOCK" = 0 ] && say "(CloudFront sends no header and the lock is off: the state before the roll-out)"
+      exit 1
+    fi
+    if [ -n "$(version_of AWSCURRENT)" ]; then CUR="$(fetch_value AWSCURRENT "$GKOI_WORK/cur")"; say "$SECRET AWSCURRENT: fingerprint=$CUR"; else say "$SECRET: EMPTY (no AWSCURRENT)"; fi
+    if [ -n "$(version_of AWSPENDING)" ]; then PEN="$(fetch_value AWSPENDING "$GKOI_WORK/pen")"; say "$SECRET AWSPENDING: fingerprint=$PEN (a rotation is in flight)"; fi
+    if [ -n "$(version_of AWSPREVIOUS)" ]; then say "$SECRET AWSPREVIOUS: fingerprint=$(fetch_value AWSPREVIOUS "$GKOI_WORK/prev") (no longer accepted after the next edge-alb apply)"; fi
+    [ "$CF_ALL_DEPLOYED" = 1 ] || { say "FAIL: not every distribution is Deployed"; rc=1; }
+    if [ "$CF_FPS" = "-" ]; then
+      [ "$LOCK" = 0 ] || { say "FAIL: the lock is ON and CloudFront sends NO header — the site is refused"; rc=1; }
+      [ $rc -ne 0 ] || say "NOT READY: no header anywhere, lock off (the state before 'set') — site_origin_lock must stay false"
+      rc=1
+    else
+      for fp in $CF_FPS; do
+        if [ "$fp" = "-" ]; then say "FAIL: a distribution sends no header while another does"; rc=1
+        elif [ "$fp" != "$CUR" ] && [ "$fp" != "$PEN" ]; then say "FAIL: a distribution sends a value (fingerprint $fp) that is neither AWSCURRENT nor AWSPENDING"; rc=1; fi
+      done
+      case "$CF_FPS" in *" "*) say "FAIL: the three distributions do not send the same value (a push is half done — run it again)"; rc=1 ;; esac
+      if [ $rc -eq 0 ] && [ "$CF_FPS" = "$CUR" ]; then say "OK: all three send AWSCURRENT and are Deployed — READY for site_origin_lock = true"; fi
+      if [ $rc -eq 0 ] && [ "$CF_FPS" != "$CUR" ]; then say "OK: all three send AWSPENDING and are Deployed — next: 'promote'"; fi
+    fi
+    exit $rc
     ;;
   wait)
-    for t in "${TARGETS[@]}"; do
-      read -r name id domain <<<"$t"
-      say "waiting for $name $id to be Deployed"
-      awsc cloudfront wait distribution-deployed --id "$id" || die "$name $id did not reach Deployed"
-    done
-    say "all three Deployed"
+    wait_deployed
     ;;
   set)
-    if [ "$PUSH" = 1 ]; then
-      # A header already in place means the lock may be ON: replacing the value in one go would 403 the whole site until
-      # the ALB learns it. That is a ROTATION — it goes set --no-push → apply (accept_previous) → push.
-      for t in "${TARGETS[@]}"; do
-        read -r name id domain <<<"$t"
-        read_config "$name" "$id"
-        read -r present _ _ <<<"$(describe "$name" "$domain")"
-        [ "$present" = no ] || die "$name already sends $HEADER — a new value is a ROTATION: 'set --no-push', apply edge-alb with site_origin_accept_previous = true, then 'push' (a half-done first run: 'remove', then 'set')"
-      done
-    fi
-    new_value
-    if [ "$DRY" = 1 ]; then
-      say "DRY RUN: would put a new 64-character value into $SECRET$([ "$PUSH" = 1 ] && printf ' and set it on:')"
+    need_read_access
+    [ "$(lock_values)" = 0 ] || die "the ALB lock is ON — a new value is a ROTATION: 'stage' → edge-alb apply → 'push' → 'promote' → edge-alb apply"
+    survey
+    [ "$CF_FPS" = "-" ] || die "a distribution already sends $HEADER — first time only. A half-done first run: 'repair' (re-sends AWSCURRENT). A new value: the rotation ('stage' …)"
+    [ -z "$(version_of AWSPENDING)" ] || die "$SECRET has an AWSPENDING version — 'abort' it first"
+    new_value "$GKOI_WORK/value"
+    if [ "$DRY" = 1 ]; then say "DRY RUN: would store a new 64-character value in $SECRET as AWSCURRENT and set it on:"; else store_value "$GKOI_WORK/value" AWSCURRENT; fi
+    apply_all "$GKOI_WORK/value"
+    [ "$DRY" = 1 ] || { wait_deployed; say "next: '$GKOI_TOOL check' must say READY; only then site_origin_lock = true"; }
+    ;;
+  repair)
+    [ -n "$(version_of AWSCURRENT)" ] || die "$SECRET is empty — nothing to re-send ('set')"
+    fetch_value AWSCURRENT "$GKOI_WORK/value" >/dev/null
+    apply_all "$GKOI_WORK/value"
+    [ "$DRY" = 1 ] || wait_deployed
+    ;;
+  stage)
+    need_read_access
+    [ -n "$(version_of AWSCURRENT)" ] || die "$SECRET has no AWSCURRENT — nothing to rotate ('set' is the first time)"
+    [ -z "$(version_of AWSPENDING)" ] || die "$SECRET already has an AWSPENDING version — finish that rotation ('push', 'promote') or 'abort' it; a second one is refused"
+    new_value "$GKOI_WORK/value"
+    if [ "$DRY" = 1 ]; then say "DRY RUN: would store a new 64-character value in $SECRET as AWSPENDING (AWSCURRENT untouched, CloudFront untouched)"
     else
-      awsc secretsmanager put-secret-value --secret-id "$SECRET" --secret-string file://value \
-        --query VersionId --output text >"$GKOI_WORK/version" || die "put-secret-value on $SECRET failed (is edge-alb applied — does the secret exist?)"
-      say "$SECRET: new value stored (version $(cat "$GKOI_WORK/version")); the one before it is AWSPREVIOUS"
+      store_value "$GKOI_WORK/value" AWSPENDING
+      say "next: gkoi-infra-run edge-alb apply (the ALB then accepts AWSCURRENT + AWSPENDING), then '$GKOI_TOOL push'"
     fi
-    if [ "$PUSH" = 1 ]; then apply_all "$GKOI_WORK/value"; else say "--no-push: CloudFront untouched (rotation: now apply edge-alb with site_origin_accept_previous = true, then 'push')"; fi
     ;;
   push)
-    awsc secretsmanager get-secret-value --secret-id "$SECRET" --query SecretString --output text >"$GKOI_WORK/value" \
-      || die "cannot read $SECRET (attach iam/gkoi-orchestrator-origin-lock.json to gkoi-orchestrator)"
+    [ -n "$(version_of AWSPENDING)" ] || die "$SECRET has no AWSPENDING version — 'stage' first (to re-send AWSCURRENT: 'repair')"
+    LOCK="$(lock_values)"
+    [ "$LOCK" = 0 ] || [ "$LOCK" -ge 2 ] || die "the ALB lock is ON and accepts only $LOCK value — it does not accept the pending one yet: run gkoi-infra-run edge-alb apply first (pushing now would 403 the site)"
+    fetch_value AWSPENDING "$GKOI_WORK/value" >/dev/null
     apply_all "$GKOI_WORK/value"
+    [ "$DRY" = 1 ] || { wait_deployed; say "next: '$GKOI_TOOL check' (all three send AWSPENDING), then '$GKOI_TOOL promote'"; }
+    ;;
+  promote)
+    NEW="$(version_of AWSPENDING)"; OLD="$(version_of AWSCURRENT)"
+    [ -n "$NEW" ] || die "$SECRET has no AWSPENDING version — nothing to promote"
+    [ -n "$OLD" ] || die "$SECRET has no AWSCURRENT version"
+    PEN="$(fetch_value AWSPENDING "$GKOI_WORK/pen")"
+    survey
+    [ "$CF_ALL_DEPLOYED" = 1 ] || die "not every distribution is Deployed — 'wait', then again"
+    [ "$CF_FPS" = "$PEN" ] || die "not all three distributions send the pending value (fingerprint $PEN) — 'push' first"
+    if [ "$NEW" != "$OLD" ]; then
+      awsc secretsmanager update-secret-version-stage --secret-id "$SECRET" --version-stage AWSCURRENT \
+        --move-to-version-id "$NEW" --remove-from-version-id "$OLD" --query Name --output text >/dev/null \
+        || die "moving AWSCURRENT failed — nothing changed; run 'promote' again"
+    fi
+    awsc secretsmanager update-secret-version-stage --secret-id "$SECRET" --version-stage AWSPENDING \
+      --remove-from-version-id "$NEW" --query Name --output text >/dev/null \
+      || die "AWSCURRENT moved, but removing AWSPENDING failed — harmless (both labels name the same value); run 'promote' again"
+    say "$SECRET: version $NEW is AWSCURRENT, the old one AWSPREVIOUS, no AWSPENDING"
+    say "next: gkoi-infra-run edge-alb apply (the old value stops being accepted)"
+    ;;
+  abort)
+    NEW="$(version_of AWSPENDING)"
+    [ -n "$NEW" ] || die "$SECRET has no AWSPENDING version — nothing to abort"
+    [ "$NEW" != "$(version_of AWSCURRENT)" ] || die "that version is also AWSCURRENT (a 'promote' is half done) — run 'promote' again instead"
+    PEN="$( (fetch_value AWSPENDING "$GKOI_WORK/pen") 2>/dev/null)" || PEN=malformed # a malformed staged value can still be dropped
+    survey
+    case " $CF_FPS " in *" $PEN "*) die "a distribution already sends the pending value — finish the rotation ('push', 'promote'), do not abort" ;; esac
+    awsc secretsmanager update-secret-version-stage --secret-id "$SECRET" --version-stage AWSPENDING \
+      --remove-from-version-id "$NEW" --query Name --output text >/dev/null || die "removing AWSPENDING failed"
+    say "$SECRET: the staged value is dropped (AWSCURRENT untouched). Next: gkoi-infra-run edge-alb apply if one ran while it was staged (back to one accepted value)"
     ;;
   remove)
+    LOCK="$(lock_values)"
+    if [ "$LOCK" != 0 ]; then
+      [ "$FORCE" = 1 ] || die "REFUSED: the ALB lock is ON (rule $LOCK_PRIORITY demands the header) — removing the header from CloudFront would 403 the whole site. Turn the lock off first (site_origin_lock = false, edge-alb apply)"
+      say "WARNING: the lock is ON and --force-while-locked-THE-SITE-WILL-403 was given — the site WILL be refused as CloudFront deploys this"
+    fi
     apply_all -
     ;;
 esac
-[ "$DRY" = 1 ] || [ "$CMD" = check ] || [ "$CMD" = wait ] || say "CloudFront deploys a change in a few minutes: '$GKOI_TOOL wait', then '$GKOI_TOOL check'"

@@ -19,6 +19,15 @@ echo "== stack $TF_STACK, action $TF_ACTION, commit ${CODEBUILD_RESOLVED_SOURCE_
 
 terraform -chdir="$dir" init -input=false -lockfile=readonly
 
+# The stack's offline tests (mock provider: no AWS call, no state) run BEFORE the plan; a failure stops the run.
+# Listed stacks only: compute's tests/ predate the 2026-11-11 unparking and fail on main (2 of 7) — add it here once
+# they are brought up to date.
+TEST_STACKS=" edge-alb "
+if [[ "$TEST_STACKS" == *" $TF_STACK "* ]] && [ -d "$dir/tests" ]; then
+  echo "== terraform test ($TF_STACK)"
+  terraform -chdir="$dir" test -no-color || { echo "tf-run: terraform test FAILED for $TF_STACK — no plan" >&2; exit 4; }
+fi
+
 set +e
 terraform -chdir="$dir" plan -input=false -lock-timeout=5m -detailed-exitcode -out=tfplan
 plan_ec=$?

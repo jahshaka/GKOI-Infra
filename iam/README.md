@@ -21,14 +21,17 @@ aws iam put-role-policy --role-name gkoi-orchestrator --policy-name gkoi-orchest
 gkoi-aws ssm get-parameter --name /gkoi/prod2/ops/psql-run-config --query Parameter.Value --output text
 ```
 
-- `gkoi-orchestrator-origin-lock.json` — `secretsmanager:GetSecretValue` on the ONE secret `gkoi/prod2/edge/site-origin`
-  (edge-alb's site-origin lock, README "The site-origin lock"). `tools/gkoi-origin-header push` (a rotation's third
-  step, or a repair) and the "with the header" proof `curl` need to read it. NOT needed for the first roll-out:
-  `gkoi-origin-header set` makes the value, stores it (the role's existing `PutSecretValue` on `gkoi/prod2/*`) and sets it
-  on CloudFront (its existing `cloudfront:UpdateDistribution`) in one run, without reading it back. Attach it after
-  edge-alb created the secret:
+- `gkoi-orchestrator-origin-lock.json` — `secretsmanager:GetSecretValue`, `ListSecretVersionIds` and
+  `UpdateSecretVersionStage` on the ONE secret `gkoi/prod2/edge/site-origin` (edge-alb's site-origin lock, README "The
+  site-origin lock"). `tools/gkoi-origin-header` needs it from the FIRST roll-out on: `set` reads the stored value back
+  (to prove it has no trailing newline) before it goes to CloudFront, `check` compares CloudFront's header with the
+  secret, a rotation stages / promotes versions. (Storing a value uses the role's existing `PutSecretValue` on
+  `gkoi/prod2/*`, CloudFront its existing `cloudfront:UpdateDistribution`, the lock's state `elasticloadbalancing:Describe*`.)
+  Attach it BEFORE `gkoi-origin-header set` (the ARN pattern is valid before the secret exists):
 
 ```bash
 aws iam put-role-policy --role-name gkoi-orchestrator --policy-name gkoi-orchestrator-origin-lock \
   --policy-document file://iam/gkoi-orchestrator-origin-lock.json
+# check from the dev box, after edge-alb created the secret (prints 0, no AccessDenied):
+gkoi-aws secretsmanager list-secret-version-ids --secret-id gkoi/prod2/edge/site-origin --query 'length(Versions)'
 ```

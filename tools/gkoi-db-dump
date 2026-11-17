@@ -50,6 +50,10 @@ case "$APP" in
   *) die "app must be cms, engine or fm (got '$APP')" ;;
 esac
 [ -n "${GKOI_DB_DUMP_HOST:-}" ] || die "the default host $HOST was a Lightsail server, RETIRED on 2026-11-17 (its address may belong to someone else now). Prod runs on RDS. To dump from another compose box, name it: GKOI_DB_DUMP_HOST=<ssh alias>"
+case "$GKOI_DB_DUMP_HOST" in
+  *gkoi-beta-*|*52.24.67.48*|*52.42.179.188*|*34.212.239.200*)
+    die "GKOI_DB_DUMP_HOST=$GKOI_DB_DUMP_HOST names a Lightsail server RETIRED on 2026-11-17 (the gkoi-beta-* aliases; 52.24.67.48, 52.42.179.188, 34.212.239.200 may belong to someone else now) — refused" ;;
+esac
 HOST="${GKOI_DB_DUMP_HOST:-$HOST}" PROJECT="${GKOI_DB_DUMP_PROJECT:-$PROJECT}" SERVICE="${GKOI_DB_DUMP_SERVICE:-$SERVICE}"
 BUCKET="${GKOI_DB_TRANSIT_BUCKET:-gkoi-prod2-db-transit-$GKOI_ACCOUNT}"
 for v in "$PROJECT" "$SERVICE"; do [[ "$v" =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "bad compose name '$v'"; done

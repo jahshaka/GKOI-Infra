@@ -49,13 +49,21 @@ locals {
 
   # --- the site-origin lock (audit 2026-11-17; README "The site-origin lock") ----------------------------------
   # The values a request to the cms hosts must carry in X-Origin-Verify once var.site_origin_lock is on: the secret's
-  # AWSCURRENT value, plus AWSPREVIOUS while a rotation is in flight (var.site_origin_accept_previous).
+  # AWSCURRENT value, plus its AWSPENDING value WHENEVER the secret has one (a rotation in flight: the tool stages the
+  # new value as AWSPENDING, so AWSCURRENT — what CloudFront still sends — is accepted by every apply, from any commit,
+  # at every step). At most two values: every locked rule is sized for two (≤ 5 condition values).
   site_lock = var.site_origin_lock
+  site_pending = local.site_lock && anytrue(flatten([
+    for d in data.aws_secretsmanager_secret_versions.site_origin : [for v in d.versions : contains(v.version_stages, "AWSPENDING")]
+  ]))
   site_secrets = distinct(concat(
     [for v in data.aws_secretsmanager_secret_version.site_origin : v.secret_string],
-    [for v in data.aws_secretsmanager_secret_version.site_origin_previous : v.secret_string],
+    [for v in data.aws_secretsmanager_secret_version.site_origin_pending : v.secret_string],
   ))
-  site_origin_fqdn = "${var.cms_site_origin_host}.${var.zone_name}"
+  # Not a secret: how many values the rules accept (1, or 2 during a rotation; 0 = lock off).
+  site_secret_count     = local.site_lock ? (local.site_pending ? 2 : 1) : 0
+  site_cdn_not_deployed = [for k, d in data.aws_cloudfront_distribution.site : "${k} ${d.id}" if d.status != "Deployed"]
+  site_origin_fqdn      = "${var.cms_site_origin_host}.${var.zone_name}"
   # cdn, locked: one forward rule per path × method (1 host + ≤ 2 secret values + 1 path + 1 method = the 5-value limit)
   cms_cdn_locked = local.site_lock ? {
     for i, pm in setproduct(var.cms_cdn_paths, ["GET", "HEAD"]) : "${pm[0]} ${pm[1]}" => { path = pm[0], method = pm[1], priority = 196 + i }
@@ -92,10 +100,25 @@ data "aws_secretsmanager_secret_version" "site_origin" {
   secret_id = aws_secretsmanager_secret.site_origin.id
 }
 
-data "aws_secretsmanager_secret_version" "site_origin_previous" {
-  count         = local.site_lock && var.site_origin_accept_previous ? 1 : 0
+# Which stages the secret has (labels only — no value): an AWSPENDING version = a rotation in flight.
+data "aws_secretsmanager_secret_versions" "site_origin" {
+  count     = local.site_lock ? 1 : 0
+  secret_id = aws_secretsmanager_secret.site_origin.id
+}
+
+data "aws_secretsmanager_secret_version" "site_origin_pending" {
+  count         = local.site_pending ? 1 : 0
   secret_id     = aws_secretsmanager_secret.site_origin.id
-  version_stage = "AWSPREVIOUS"
+  version_stage = "AWSPENDING"
+}
+
+# The three hand-managed distributions whose origins are locked: read ONLY while the lock is on, and only for their
+# Status — a plan / apply with the lock on STOPS while any of them is still deploying a change (the header may not
+# be on every edge yet). Whether the header VALUE is the secret's is tools/gkoi-origin-header check's job (this data
+# source does not expose origins). Needs cloudfront:GetDistribution (the runner's PowerUserAccess has it).
+data "aws_cloudfront_distribution" "site" {
+  for_each = local.site_lock ? var.site_cloudfront_distributions : {}
+  id       = each.value
 }
 
 # --- certificate -------------------------------------------------------------------------------------------------
@@ -116,17 +139,14 @@ resource "aws_acm_certificate" "alb" {
 # that name in this account, so a CNAME an existing cert already uses has the identical value: allow_overwrite
 # adopts it without changing it. (Destroying this stack would then delete it — see README "edge-alb".)
 resource "aws_route53_record" "validation" {
-  for_each = {
-    for o in aws_acm_certificate.alb.domain_validation_options : o.domain_name => {
-      name   = o.resource_record_name
-      type   = o.resource_record_type
-      record = o.resource_record_value
-    }
-  }
+  # Keyed by the certificate's names (known from the configuration — the same keys the old
+  # `for o in domain_validation_options : o.domain_name` produced, so no address changes), the record looked up per
+  # name: the keys no longer depend on a value known only after apply, which also lets `terraform test` plan this stack.
+  for_each        = toset(local.cert_names)
   zone_id         = data.aws_route53_zone.this.zone_id
-  name            = each.value.name
-  type            = each.value.type
-  records         = [each.value.record]
+  name            = one([for o in aws_acm_certificate.alb.domain_validation_options : o.resource_record_name if o.domain_name == each.key])
+  type            = one([for o in aws_acm_certificate.alb.domain_validation_options : o.resource_record_type if o.domain_name == each.key])
+  records         = [one([for o in aws_acm_certificate.alb.domain_validation_options : o.resource_record_value if o.domain_name == each.key])]
   ttl             = 300
   allow_overwrite = true
 }
@@ -415,7 +435,7 @@ resource "aws_lb_listener_rule" "host" {
 # distributions add it as an origin custom header — hand-managed, tools/gkoi-origin-header) and everything else on
 # these hosts is a fixed 403, as origin-live does (rules 10–13). An ALB rule has no "not", so the secret is a condition
 # of each allow rule and a 403 rule closes each host; a rule takes at most 5 condition values, so the cdn / labs
-# forward rules are split per path / method (leaving room for TWO secret values during a rotation). With the lock off
+# forward rules are split per path / method (leaving room for TWO secret values: AWSCURRENT + AWSPENDING in a rotation). With the lock off
 # the rules are exactly the pre-lock ones. Each in-place change waits (depends_on) for the new allow rules, so no
 # request that is allowed after the apply is refused during it.
 
@@ -509,7 +529,7 @@ resource "aws_lb_listener_rule" "cms_cdn" {
     precondition {
       # ALB condition values are at most 128 chars (the same rule as the live-origin secret).
       condition     = alltrue([for v in local.site_secrets : can(regex("^[A-Za-z0-9_-]{32,128}$", v))])
-      error_message = "The site-origin secret must be 32–128 characters of [A-Za-z0-9_-] to fit an ALB header condition."
+      error_message = "The site-origin secret (AWSCURRENT, or AWSPENDING) is not exactly 32–128 characters of [A-Za-z0-9_-] — e.g. it was stored with a trailing newline or by hand. Do NOT loosen this check (a value CloudFront does not send byte for byte = 403 for the whole site). Leave site_origin_lock off and store a clean value with tools/gkoi-origin-header (first time: `remove`, then `set`; in a rotation: `abort`, then `stage`)."
     }
   }
 }
@@ -749,9 +769,11 @@ resource "aws_lb_listener_rule" "apex_redirect" {
 # The site-origin lock's ONE door that stays open without the secret (var.cms_origin_open_paths, on origin-www only):
 # the build boxes' upload API. `POST /api/v1/downloads/:app/:platform` streams installers of up to 4 GiB for many
 # minutes, which the publish CLIs send to origin-www on purpose (SPEC-PAGE-SPEED-V1: not through CloudFront); the same
-# CLI run reads its submission at /api/v1/app-updates/**. Every route there checks its own credential (a publisher key,
-# `Authorization: Bearer dl_…`), and the callers are other boxes (the Mac, the Windows VM) that must not hold the
-# origin secret. Empty list = no door.
+# CLI run opens / reads / documents its submission at /api/v1/app-updates/submissions… and self-checks at
+# /api/v1/app-updates/tool/info. EXACTLY what aisolver-www scripts/downloads/publish.mjs and scripts/updater/submit.mjs
+# call — NOT the rest of /api/v1/app-updates (its /check reads the trusted viewer country: it must stay behind the
+# CDN). The callers are other boxes (the Mac, the Windows VM) that must not hold the origin secret; the submission and
+# upload routes check their own publisher key, /tool/info is public. Empty list = no door.
 resource "aws_lb_listener_rule" "cms_origin_open" {
   count        = local.site_lock && length(var.cms_origin_open_paths) > 0 ? 1 : 0
   listener_arn = aws_lb_listener.https.arn
@@ -805,6 +827,10 @@ resource "aws_lb_listener_rule" "cms" {
   depends_on = [aws_lb_listener_rule.cms_origin_open]
 
   lifecycle {
+    precondition {
+      condition     = length(local.site_cdn_not_deployed) == 0
+      error_message = "site_origin_lock is on, but these CloudFront distributions are not Deployed (a change is still reaching the edges): ${join(", ", local.site_cdn_not_deployed)}. Wait (tools/gkoi-origin-header wait), run `tools/gkoi-origin-header check`, then plan again."
+    }
     precondition {
       condition     = length(local.cms_open_fqdns) >= 1 && length(local.cms_open_fqdns) <= 3
       error_message = "The cms hosts other than the cdn / labs origins must be 1–3 (an ALB condition takes at most 3 values; with the site-origin lock: hosts + 2 secret values ≤ 5)."

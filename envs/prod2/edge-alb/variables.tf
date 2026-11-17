@@ -165,26 +165,33 @@ variable "site_origin_lock" {
     false = the cms hosts (origin-www / www / origin-cdn / origin-labs) answer anyone, as before 2026-11-17. true = they
     forward ONLY requests carrying the site-origin secret in X-Origin-Verify; everything else on them is a 403 (except
     cms_origin_open_paths). Turn it on ONLY after the three CloudFront distributions send the header and are Deployed
-    (tools/gkoi-origin-header check) — the README has the order and the rollback (set it back to false and apply).
+    (tools/gkoi-origin-header check must PASS) — the README has the order and the rollback (set it back to false and
+    apply). The plan itself stops when the secret is empty or malformed, or a distribution is not Deployed.
   EOT
   type        = bool
   default     = false
 }
 
-variable "site_origin_accept_previous" {
-  description = "Rotation only: also accept the secret's AWSPREVIOUS value, while CloudFront moves from the old value to the new one (README \"The site-origin lock\", rotation)."
-  type        = bool
-  default     = false
+variable "site_cloudfront_distributions" {
+  description = "The hand-managed CloudFront distributions whose origins are the locked cms hosts (name → id). With the lock on, a plan stops unless each is Deployed."
+  type        = map(string)
+  default = {
+    www  = "E32GUUVFJFZWS7"
+    cdn  = "E16YQ7HYLBQUPQ"
+    labs = "E28154TBILFIGK"
+  }
 }
 
 variable "cms_origin_open_paths" {
   description = <<-EOT
-    Paths of origin-www.gkoi.com that stay reachable WITHOUT the site-origin secret while the lock is on: the build
-    boxes' upload API (multi-GiB bodies sent straight to the origin; every route checks its own publisher key). At most
-    4 (1 host + 4 paths = the 5-value rule limit). [] = nothing stays open.
+    Paths of origin-www.gkoi.com that stay reachable WITHOUT the site-origin secret while the lock is on: exactly what
+    the build boxes' publish CLIs call there (aisolver-www scripts/downloads/publish.mjs, scripts/updater/submit.mjs) —
+    the upload (multi-GiB bodies sent straight to the origin), the submission routes, the tool's self-check. Never widen
+    it to /api/v1/app-updates/* (/check trusts the CDN's viewer-country header). At most 4 (1 host + 4 paths = the
+    5-value rule limit). [] = nothing stays open.
   EOT
   type        = list(string)
-  default     = ["/api/v1/downloads/*", "/api/v1/app-updates/*"]
+  default     = ["/api/v1/downloads/*", "/api/v1/app-updates/submissions*", "/api/v1/app-updates/tool/info"]
   validation {
     condition     = length(var.cms_origin_open_paths) <= 4 && alltrue([for p in var.cms_origin_open_paths : startswith(p, "/api/v1/")])
     error_message = "cms_origin_open_paths: at most 4 paths, each under /api/v1/."

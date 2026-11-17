@@ -87,57 +87,115 @@ distribution adds as an origin custom header; everything else on those hosts is 
 | 210 | origin-labs | secret + that path, another method | 403 |
 | 211 / 212 | origin-labs | secret + GET/HEAD / everything else | 302 → www/labs / 403 |
 | 220 | gkoi.com | — (direct, by design) | 301 → www |
-| 228 | origin-www | `cms_origin_open_paths` (`/api/v1/downloads/*`, `/api/v1/app-updates/*`), NO secret | → cms |
+| 228 | origin-www | `cms_origin_open_paths`, NO secret | → cms |
 | 230 / 231 | www, origin-www | secret / everything else | → cms / 403 |
+
+The whole listener, one line per priority, is the output `listener_rule_table`; `envs/prod2/edge-alb/tests/` pins it for
+lock off (today's 18 rules), lock on (27) and a rotation (27, two accepted values, no rule above 5 condition values).
+`tools/tf-run.sh` runs those tests before every edge-alb plan / apply (a failure = exit 4, no plan).
 
 - **Which Host CloudFront sends:** www's default behaviour forwards the viewer's Host (`www.gkoi.com`, the managed
   AllViewerAndCloudFrontHeaders policy); its `/assets/*` `/content/*` `/favicon*` `/apple-touch-icon*` behaviours, cdn
   and labs send the origin's own name. Both names are locked: `www.gkoi.com` resolves to CloudFront, but anyone can send
   that Host to the ALB's address.
-- **The open door (228).** The publish CLIs (`aisolver-www/scripts/downloads/publish.mjs`, `scripts/updater/submit.mjs`)
-  upload installers of up to 4 GiB to `https://origin-www.gkoi.com/api/v1/downloads/<app>/<platform>` — not through
-  CloudFront, on purpose (SPEC-PAGE-SPEED-V1) — from OTHER boxes (the Mac, the Windows VM), and read their submission at
-  `/api/v1/app-updates/**` with the same `--site`. Those boxes must not hold the origin secret, and every route there
-  checks its own publisher key, so these two prefixes stay open on `origin-www` only (never on `www`). Whoever calls
-  them directly can still hand-write `CloudFront-Viewer-*` headers ON THOSE ROUTES — nothing there reads them.
-  `cms_origin_open_paths = []` closes the door (then the uploads must go through `www.gkoi.com`).
-- **The value** lands in this stack's encrypted state while the lock is on (as the live-origin one). 32–128 characters
-  of `[A-Za-z0-9_-]` (a precondition). The same header NAME as origin-live, a DIFFERENT secret (live's is shared with
-  the engine edge and the media boxes).
+- **The open door (228)** — `origin-www.gkoi.com` only, never `www`: `/api/v1/downloads/*`,
+  `/api/v1/app-updates/submissions*`, `/api/v1/app-updates/tool/info`. That is EXACTLY what the two publish CLIs call
+  (`aisolver-www/scripts/downloads/publish.mjs` :211 upload, :217 status; `scripts/updater/submit.mjs` :427 :433 :545
+  :579 :638 the submission routes, :493 upload, :656 `/tool/info`): they upload installers of up to 4 GiB to
+  `https://origin-www.gkoi.com/api/v1/downloads/<app>/<platform>` — not through CloudFront, on purpose
+  (SPEC-PAGE-SPEED-V1) — from OTHER boxes (the Mac, the Windows VM), which must not hold the origin secret. The upload
+  and submission routes check their own publisher key; `/tool/info` is public (a version + sha256). NOT open, on
+  purpose: the rest of `/api/v1/app-updates/` — `/check` records the TRUSTED viewer country (a direct caller could
+  forge it), `/keys`, `/tool`, `/docs`, `/runner/*` — and every other upload API: **labs / games builds and character
+  previews go to `https://www.gkoi.com`** (through CloudFront), a direct call gets the ALB's 403. On the three open
+  prefixes a direct caller can still hand-write `CloudFront-Viewer-*` headers: the routes behind them do not read the
+  viewer country (checked 2026-11-17: `routes/downloads.ts` reads it only on the public `/downloads/…` redirect, which
+  is not under the door), but the CMS nginx takes the client address from `CloudFront-Viewer-Address`
+  (`CMS_REALIP_MODE=cloudfront`), so a direct caller can still pick the address those routes' rate limits see — the
+  publisher key is the gate there. Re-check when a route is added under these prefixes. `cms_origin_open_paths = []` closes the door (then the uploads
+  must go through `www.gkoi.com`).
+- **The value** lands in this stack's encrypted state while the lock is on (as the live-origin one). Exactly 32–128
+  characters of `[A-Za-z0-9_-]`, no whitespace — the tool stores it without a newline, reads it back to prove it, and a
+  precondition stops the plan otherwise (never loosen it: the ALB compares byte for byte). The same header NAME as
+  origin-live, a DIFFERENT secret (live's is shared with the engine edge and the media boxes).
+- **What a plan with the lock on refuses:** an empty secret (the data source fails), a malformed value, a distribution
+  that is not `Deployed` (`data.aws_cloudfront_distribution.site`, `cloudfront:GetDistribution` — the runner's
+  PowerUserAccess has it). It can NOT see whether the header's VALUE is the secret's: that is
+  `tools/gkoi-origin-header check` (exit 0 only when all three send the same value and it is the secret's).
 - **Health checks** are not affected: a target group's health check goes from the ALB nodes straight to the task,
   never through a listener rule. The Route 53 health check on `www.gkoi.com` goes through CloudFront.
 
-Roll-out (each step is safe on its own; nothing is refused before step 4):
+Roll-out (each step is safe on its own; nothing is refused before step 5):
 
+0. Operator, once: attach `iam/gkoi-orchestrator-origin-lock.json` to `gkoi-orchestrator` (iam/README.md) — the tool
+   reads the secret back and compares it with CloudFront; without it `set` and `check` refuse.
 1. `gkoi-infra-run edge-alb apply` with `site_origin_lock = false` (the default): creates the EMPTY secret; no rule
    changes. Roll-back: none needed (an unused secret).
-2. `tools/gkoi-origin-header set` — makes the value, stores it, sets the header on the three distributions (harmless:
-   the ALB ignores it). Then `tools/gkoi-origin-header wait` and `check`: three × `present=yes`, ONE fingerprint, all
-   `Deployed`. Roll-back: `tools/gkoi-origin-header remove`.
-3. Commit `site_origin_lock = true` (variables.tf default), `gkoi-infra-run edge-alb plan` — read it: the plan FAILS if
-   the secret has no value; it must show only listener rules (9 to create, 5 to update in place, nothing destroyed).
-4. `gkoi-infra-run edge-alb apply`. The new allow rules are created before the old ones change (depends_on).
-   Verify (expect, in order: 200 · 200 · 200 · 403 · 403 · 403 · 403 · 301 · not 403 · 401/403 from the APP, not the ALB's
-   plain-text `Forbidden`):
+2. `tools/gkoi-origin-header set` — makes the value, stores it, reads it back, sets the header on the three
+   distributions (harmless: the ALB ignores it), waits until they are Deployed. Roll-back: `tools/gkoi-origin-header remove`.
+3. `tools/gkoi-origin-header check` → must END with `READY for site_origin_lock = true` and exit 0.
+4. Commit `site_origin_lock = true` (variables.tf default), `gkoi-infra-run edge-alb plan` — read it: it must show only
+   listener rules (9 to create, 5 to update in place, nothing destroyed).
+5. `gkoi-infra-run edge-alb apply`. The new allow rules are created before the old ones change (depends_on). Verify —
+   each line is one check, the expected answer after `→`:
    ```
-   curl -s -o /dev/null -w '%{http_code}\n' https://www.gkoi.com/
-   curl -s -o /dev/null -w '%{http_code}\n' https://cdn.gkoi.com/assets/<a real asset path>
-   curl -s -o /dev/null -w '%{http_code}\n' https://labs.gkoi.com/content/labs/<a real build file>
-   curl -s -o /dev/null -w '%{http_code}\n' https://origin-www.gkoi.com/
-   curl -s -o /dev/null -w '%{http_code}\n' --resolve www.gkoi.com:443:"$(dig +short origin-www.gkoi.com | head -1)" https://www.gkoi.com/
-   curl -s -o /dev/null -w '%{http_code}\n' https://origin-cdn.gkoi.com/assets/<the same asset path>
-   curl -s -o /dev/null -w '%{http_code}\n' https://origin-labs.gkoi.com/content/labs/<the same build file>
-   curl -s -o /dev/null -w '%{http_code}\n' https://gkoi.com/
-   curl -s -o /dev/null -w '%{http_code}\n' https://engine.gkoi.com/healthz ; curl -s -o /dev/null -w '%{http_code}\n' https://files.gkoi.com/api/v1/healthz
-   curl -s -w '\n%{http_code}\n' -X POST https://origin-www.gkoi.com/api/v1/downloads/gkoi-live/macos
+   c() { curl -s -o /dev/null -w '%{http_code} %{content_type}\n' "$@"; }
+   A=<a real asset path, e.g. /assets/…css>   B=<a real labs build file, e.g. /content/labs/war-room/<ver>/NOTICES.txt>
+   c https://www.gkoi.com/                                        # → 200 text/html             (through CloudFront)
+   c https://cdn.gkoi.com$A                                       # → 200
+   c https://labs.gkoi.com$B                                      # → 200
+   c -X POST https://www.gkoi.com/api/v1/devices/mint             # → the APP's answer (401, application/json) — NOT "403 text/plain"
+   c https://origin-www.gkoi.com/                                 # → 403 text/plain            (direct: refused)
+   c --resolve www.gkoi.com:443:"$(dig +short origin-www.gkoi.com | head -1)" https://www.gkoi.com/   # → 403 text/plain
+   c https://origin-cdn.gkoi.com$A                                # → 403 text/plain
+   c https://origin-labs.gkoi.com$B                               # → 403 text/plain
+   c https://origin-www.gkoi.com/api/v1/app-updates/check         # → 403 text/plain            (not part of the door)
+   c https://gkoi.com/                                            # → 301
+   c https://engine.gkoi.com/healthz                              # → 200                       (direct, by design)
+   c https://files.gkoi.com/api/v1/healthz                        # → 200                       (direct, by design)
+   c -X POST https://origin-www.gkoi.com/api/v1/downloads/gkoi-live/macos   # → the APP's 401 application/json (the door: no key)
+   c https://origin-www.gkoi.com/api/v1/app-updates/tool/info     # → 200 application/json      (the door)
    ```
-   Roll-back: commit `site_origin_lock = false`, apply (5 in place, 9 destroyed — needs `--allow-destroy`; the old
-   forwards come back before the locked ones go). Faster, if the site is down: nothing by hand — the apply is ~1 minute.
+   Roll-back: commit `site_origin_lock = false`, `gkoi-infra-run edge-alb apply --allow-destroy --yes` (5 in place, 9
+   destroyed; a commit + a CodeBuild run, a few minutes).
 
-Rotation (no refused request at any point): `gkoi-origin-header set --no-push` (new value = AWSCURRENT, the old one
-AWSPREVIOUS) → commit `site_origin_accept_previous = true`, apply (the ALB accepts both) → `gkoi-origin-header push`,
-`wait`, `check` → commit `site_origin_accept_previous = false`, apply (the old value stops working). `push` needs
-`iam/gkoi-orchestrator-origin-lock.json`.
+**Emergency unlock (the site answers 403 and it cannot wait for a run).** Three `modify-rule` calls put the three
+forwards back as they were before the lock; the role needs `elasticloadbalancing:ModifyRule` (`gkoi-orchestrator` has
+only `Describe*` — the operator / an AWS MCP sign-in runs these). The FIRST call alone restores `www.gkoi.com`:
+
+```
+L=$(aws elbv2 describe-listeners --load-balancer-arn "$(aws elbv2 describe-load-balancers --names gkoi-prod2-alb \
+      --query 'LoadBalancers[0].LoadBalancerArn' --output text)" --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text)
+arn() { aws elbv2 describe-rules --listener-arn "$L" --query "Rules[?Priority=='$1'].RuleArn | [0]" --output text; }
+TG=$(aws elbv2 describe-target-groups --names gkoi-p2-cms-8080 --query 'TargetGroups[0].TargetGroupArn' --output text)
+aws elbv2 modify-rule --rule-arn "$(arn 230)" --query 'Rules[0].Priority' \
+  --conditions Field=host-header,Values=origin-www.gkoi.com,www.gkoi.com                      # www: host only again
+aws elbv2 modify-rule --rule-arn "$(arn 200)" --query 'Rules[0].Priority' --actions Type=forward,TargetGroupArn=$TG \
+  --conditions Field=host-header,Values=origin-cdn.gkoi.com Field=path-pattern,Values='/content/*','/assets/*' \
+               Field=http-request-method,Values=GET,HEAD                                      # cdn
+aws elbv2 modify-rule --rule-arn "$(arn 210)" --query 'Rules[0].Priority' --actions Type=forward,TargetGroupArn=$TG \
+  --conditions Field=host-header,Values=origin-labs.gkoi.com Field=path-pattern,Values='/content/labs/*' \
+               Field=http-request-method,Values=GET,HEAD                                      # labs
+```
+
+(`--query` keeps the answer — which would echo the other conditions — off the screen.) Afterwards commit
+`site_origin_lock = false` and apply BEFORE anything else: the next edge-alb apply from a commit with the lock on would
+put the lock back.
+
+**Rotation** — the new value is staged as AWSPENDING, so AWSCURRENT (what CloudFront sends) is accepted by EVERY
+edge-alb apply, from any commit, at every step; with the lock on the rules accept AWSCURRENT + AWSPENDING whenever the
+secret has a pending version:
+
+| Step | Secret | CloudFront sends | ALB accepts (after an apply) |
+|---|---|---|---|
+| 1. `gkoi-origin-header stage` (a second one is refused) | CURRENT = old, PENDING = new | old | old (before) / old + new |
+| 2. `gkoi-infra-run edge-alb apply` | same | old | old + new |
+| 3. `gkoi-origin-header push` (refused unless the ALB accepts 2; waits Deployed), then `check` | same | new | old + new |
+| 4. `gkoi-origin-header promote` (refused unless all three send the pending value, Deployed) | CURRENT = new, PREVIOUS = old | new | old + new (before) / new |
+| 5. `gkoi-infra-run edge-alb apply` | same | new | new |
+
+Giving a staged value up before step 3: `gkoi-origin-header abort`. A half-done `push` (one distribution failed): run
+`push` again. No commit is needed for a rotation (the variable does not change).
 
 Still open after the lock (follow-ups, not built): the CMS's own nginx trusts `CloudFront-Viewer-*` from the whole VPC
 (`CMS_REALIP_FROM`) — it could also require the header; a CloudFront distribution in another AWS account can not pass
@@ -177,7 +235,8 @@ git archive --format=zip -o /tmp/gkoi-infra-source.zip HEAD          # committed
 # read the result: the build's CloudWatch log ("== plan summary: …" and the per-resource lines)
 ```
 
-`tools/tf-run.sh` exits 2 on a bad `TF_STACK`/`TF_ACTION`, with the plan's exit code on a failed plan, and 3 when an apply
+`tools/tf-run.sh` exits 2 on a bad `TF_STACK`/`TF_ACTION`, 4 when the stack's `terraform test` fails (edge-alb: before
+the plan), with the plan's exit code on a failed plan, and 3 when an apply
 would delete or replace without `ALLOW_DESTROY=yes`. Sensitive values are never printed (the plan JSON is read only for the
 counts and addresses, then deleted).
 
