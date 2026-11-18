@@ -58,6 +58,24 @@ locals {
   # edge-alb's internal ALB target group for the media boxes (P5); null while edge-alb has no such output yet, or off.
   engine_internal_tg = var.engine_internal_lb ? try(local.edge.engine_internal.target_group_arn, null) : null
 
+  # --- the site's private calls (SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1 P3) ---------------------------------------
+  # edge-alb's private listeners on the internal ALB; null while edge-alb has no such output yet, or its flag is off.
+  private_svc = try(local.edge.private_services, null)
+  # network's private subnet CIDRs (the internal ALB's nodes + every task); [] until network is applied with them.
+  home_private_cidrs = try(local.net.home_private_cidrs, [])
+  # The CMS's private URLs, only for the flags that are on. Merged AFTER default_cms_server_env (which holds the public
+  # URLs): placed in the computed base they would be overwritten by the defaults. var.cms_server_env still wins.
+  private_cms_urls = merge(
+    var.private_files_calls && local.private_svc != null ? { FILES_SERVICE_URL = local.private_svc.files_url } : {},
+    var.private_engine_calls && local.private_svc != null ? { MIKAIDO_ENGINE_URL = local.private_svc.engine_url } : {},
+  )
+  # fm-api's registration in the private FM target group (services.tf); [] = the module's default, today's service.
+  fm_private_lbs = local.private_svc == null ? [] : [{
+    target_group_arn = local.private_svc.fm_target_group_arn
+    container_name   = "api"
+    container_port   = 3200
+  }]
+
   # --- images ------------------------------------------------------------------------------------------------
   # envs/prod2/releases/<repo>.json (gkoi-release): { images: { <name>: { digest, image } } }; var.images wins.
   release_files = fileset("${path.module}/../releases", "*.json")
@@ -123,6 +141,7 @@ locals {
       DB_PORT = tostring(local.data.db_port)
     },
     local.default_cms_server_env,
+    local.private_cms_urls,
     var.cms_server_env,
   )
 
@@ -144,7 +163,14 @@ locals {
       # the edge + 172.26.10.107/32): the edge keeps the allow-listed CMS's chain `<viewer>, <cms>` and appends <cms>
       # again, so the api walks past the CMS hops down to the viewer the CMS wrote. Any other caller's chain is its
       # own socket address only (edge-maps-cidr.conf.template), so this trusts nothing a stranger writes.
-      TRUSTED_PROXIES = join(",", concat([var.engine_edge_sidecar ? "127.0.0.1" : local.vpc_cidr], var.cms_source_cidrs))
+      # engine_trust_private_callers adds the private subnets: on the internal ALB's :3100 the socket is an ALB node and
+      # the chain `<viewer>, <cms task>` (both private) walks down to the viewer. cms_source_cidrs stays (the public
+      # door is the rollback).
+      TRUSTED_PROXIES = join(",", concat(
+        [var.engine_edge_sidecar ? "127.0.0.1" : local.vpc_cidr],
+        var.cms_source_cidrs,
+        var.engine_trust_private_callers ? local.home_private_cidrs : [],
+      ))
     },
     local.default_engine_env,
     local.rehearsal_engine_env,
@@ -226,6 +252,19 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = length(local.unset_env) == 0
       error_message = "These environment values are still __SET_ME__: ${join(", ", local.unset_env)}. Set them in the *_env variables (values from the prod box's env; never commit a secret — secrets go in Secrets Manager)."
+    }
+    # The site's private calls (SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1; envs/prod2/PRIVATE-SERVICE-CALLS-RUNBOOK.md).
+    precondition {
+      condition     = !(var.private_files_calls || var.private_engine_calls) || local.private_svc != null
+      error_message = "private_files_calls / private_engine_calls need edge-alb's private listeners: edge-alb has no output private_services (apply edge-alb with create_private_service_listeners = true first)."
+    }
+    precondition {
+      condition     = !var.private_engine_calls || var.engine_trust_private_callers
+      error_message = "private_engine_calls needs engine_trust_private_callers = true, applied first: without it every proxied viewer reaches the engine as one CMS address and its per-address limits throttle everyone."
+    }
+    precondition {
+      condition     = !var.engine_trust_private_callers || length(local.home_private_cidrs) > 0
+      error_message = "engine_trust_private_callers needs network's output home_private_cidrs: apply network first."
     }
   }
 }

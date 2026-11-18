@@ -368,3 +368,42 @@ variable "engine_internal_lb" {
   type        = bool
   default     = true
 }
+
+# --- the site's private calls (SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1 P3; envs/prod2/PRIVATE-SERVICE-CALLS-RUNBOOK.md) --
+# Turn on in this order, one apply each: engine_trust_private_callers → private_files_calls → (a day later)
+# private_engine_calls. Rollback of a call flag: false + apply (one CMS redeploy). fm-api registers in edge-alb's
+# private FM target group on its own as soon as edge-alb's output private_services exists (no flag here).
+
+variable "engine_trust_private_callers" {
+  description = <<-EOT
+    true = the engine's TRUSTED_PROXIES (api, worker, migrator) also lists the home VPC's private subnets (network
+    output home_private_cidrs), so a call through edge-alb's internal ALB (`<viewer>, <cms task>` behind an ALB node,
+    both private) still resolves to the viewer. Inert alone: nobody calls privately until private_engine_calls. Needs
+    network applied with home_private_cidrs. Must be on before private_engine_calls (the preflight refuses otherwise:
+    every proxied viewer would look like one CMS address and the engine's per-address limits would throttle them all).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "private_files_calls" {
+  description = <<-EOT
+    true = the CMS's FILES_SERVICE_URL becomes edge-alb's private_services.files_url (the internal ALB's :3200, plain
+    HTTP inside the VPC) instead of https://files.gkoi.com through the NAT and the public ALB. APP_SERVICE_PUBLIC_URLS
+    and the CSP origins (what apps and browsers see) do not change. Needs edge-alb applied with
+    create_private_service_listeners. Rollback: false + apply.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "private_engine_calls" {
+  description = <<-EOT
+    true = the CMS's MIKAIDO_ENGINE_URL becomes edge-alb's private_services.engine_url (the internal ALB's :3100 → the
+    api's own :3000, /api/* and /ws/* only; the engine edge sidecar is skipped). Needs
+    create_private_service_listeners in edge-alb AND engine_trust_private_callers here applied first. Rollback:
+    false + apply.
+  EOT
+  type        = bool
+  default     = false
+}

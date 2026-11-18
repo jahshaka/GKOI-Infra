@@ -46,6 +46,11 @@ output "home_private_subnet_ids" {
   value = module.vpc_usw2.private_subnet_ids
 }
 
+output "home_private_cidrs" {
+  description = "The home VPC's private subnet CIDRs: the internal ALB's nodes and every ECS task live here (compute's engine TRUSTED_PROXIES when engine_trust_private_callers is on — SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1)."
+  value       = module.vpc_usw2.private_cidrs
+}
+
 output "home_nat_public_ips" {
   description = "The control plane's egress addresses (for third-party allow-lists)."
   value       = module.vpc_usw2.nat_public_ips
