@@ -165,7 +165,7 @@ run "flag_off_adds_nothing" {
   assert {
     condition = (
       aws_lb.engine_internal[0].name == "gkoi-prod2-engine-internal" && aws_lb.engine_internal[0].internal &&
-      aws_lb.engine_internal[0].idle_timeout == 60 && !aws_lb.engine_internal[0].enable_deletion_protection &&
+      aws_lb.engine_internal[0].idle_timeout == 300 && !aws_lb.engine_internal[0].enable_deletion_protection &&
       aws_lb.engine_internal[0].drop_invalid_header_fields &&
       jsonencode(aws_lb.engine_internal[0].subnets) == jsonencode(toset(["subnet-p1", "subnet-p2"])) &&
       jsonencode(aws_lb.engine_internal[0].security_groups) == jsonencode(toset(["sg-internal-alb"]))
@@ -314,7 +314,7 @@ run "flag_on_exact_resources" {
   # What existed is untouched.
   assert {
     condition = (
-      aws_lb.engine_internal[0].idle_timeout == 60 && aws_lb_listener.engine_internal[0].port == 3000 &&
+      aws_lb.engine_internal[0].idle_timeout == 300 && aws_lb_listener.engine_internal[0].port == 3000 &&
       jsonencode(one(aws_lb_listener_rule.engine_internal[0].condition).path_pattern[0].values) == jsonencode(toset(["/internal/*", "/api/v1/healthz"])) &&
       output.engine_internal == run.flag_off_adds_nothing.engine_internal &&
       output.listener_rule_table == run.flag_off_adds_nothing.listener_rule_table

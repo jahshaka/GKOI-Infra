@@ -258,7 +258,7 @@ variable "engine_internal_idle_timeout" {
     the site's HTTP keep-alive (55 s) stay below either value. In-place change, no replacement.
   EOT
   type        = number
-  default     = 60
+  default     = 300
   validation {
     condition     = var.engine_internal_idle_timeout >= 60 && var.engine_internal_idle_timeout <= 4000
     error_message = "engine_internal_idle_timeout: 60–4000 s (below 60 would cut the 55 s keep-alive sockets)."
