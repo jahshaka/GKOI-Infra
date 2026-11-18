@@ -1,34 +1,34 @@
 {
-  "built_at": "2026-11-18T08:22:34Z",
-  "codebuild_build_id": "gkoi-build-mikaido:53c0aef6-8f6e-4748-862b-18cfedb6d797",
-  "commit": "34f9dd2fc9ac6c1a65c5de6d481f1ec3e2bbe935",
+  "built_at": "2026-11-18T10:53:49Z",
+  "codebuild_build_id": "gkoi-build-mikaido:0449eb27-af15-4618-9e42-c7a9d4c0abe1",
+  "commit": "ff91c7b7ecb180c925fc94dc1326c6472d971946",
   "images": {
     "engine-api": {
-      "digest": "sha256:a9a43090b4ea173bea4f1330f9be0c501b2ac65954bf7e960ba74a889949a094",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-api@sha256:a9a43090b4ea173bea4f1330f9be0c501b2ac65954bf7e960ba74a889949a094"
+      "digest": "sha256:d72acd6ea9f2d375c2eddf9755b367302854cc29b3345b2840e972667f0da741",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-api@sha256:d72acd6ea9f2d375c2eddf9755b367302854cc29b3345b2840e972667f0da741"
     },
     "engine-edge": {
-      "digest": "sha256:3c6346eed63ab0a07cca3860dc4f7332c2d3320831a1b61b5a6bdc703733033b",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-edge@sha256:3c6346eed63ab0a07cca3860dc4f7332c2d3320831a1b61b5a6bdc703733033b"
+      "digest": "sha256:12205c4a4c801ff996104989db9233e29298eb642e7a7db3039b86acfc911b59",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-edge@sha256:12205c4a4c801ff996104989db9233e29298eb642e7a7db3039b86acfc911b59"
     },
     "engine-web": {
-      "digest": "sha256:9f4c846030b650d5ac3a5ec18c45a14ada773236c9290c47a23459327df4442f",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-web@sha256:9f4c846030b650d5ac3a5ec18c45a14ada773236c9290c47a23459327df4442f"
+      "digest": "sha256:851af6de79c94896e7f093fa8a4035788db3f0d5736b0d833be1ca73f9498799",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-web@sha256:851af6de79c94896e7f093fa8a4035788db3f0d5736b0d833be1ca73f9498799"
     },
     "engine-worker": {
-      "digest": "sha256:b83f593defa1841f6fe1e7fcc1505ed403353f8062e08e6ae7e0be2deeb19287",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-worker@sha256:b83f593defa1841f6fe1e7fcc1505ed403353f8062e08e6ae7e0be2deeb19287"
+      "digest": "sha256:d1e07b6032042b66e5d5317ac0fd1d5503ac7a30a98269a679e02385a88da0f0",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/engine-worker@sha256:d1e07b6032042b66e5d5317ac0fd1d5503ac7a30a98269a679e02385a88da0f0"
     },
     "media-agent": {
-      "digest": "sha256:da4d1e81957a859ebec1173cb4c31d355b8b79a47bc5c0c95bdedfa2f1988754",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/media-agent@sha256:da4d1e81957a859ebec1173cb4c31d355b8b79a47bc5c0c95bdedfa2f1988754"
+      "digest": "sha256:2bda6e762d81003c122e217d64e8948eefd8d192ec57417b35636dcbfa40b9c8",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/media-agent@sha256:2bda6e762d81003c122e217d64e8948eefd8d192ec57417b35636dcbfa40b9c8"
     },
     "mediamtx": {
-      "digest": "sha256:684e053e146e3d2442eaeb14ec825e7dcfe8eb8c13b75bb058b46eb3372d6fc3",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/mediamtx@sha256:684e053e146e3d2442eaeb14ec825e7dcfe8eb8c13b75bb058b46eb3372d6fc3"
+      "digest": "sha256:d9b73facdd90baec869d23f0ea240f1d32cb5b4b7e63cb5b00b4ae5b4b5b460a",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/mediamtx@sha256:d9b73facdd90baec869d23f0ea240f1d32cb5b4b7e63cb5b00b4ae5b4b5b460a"
     }
   },
   "repo": "mikaido",
-  "source_sha256": "f9f750cbe5c189b7cb13a561982943779f8e7da7937beb5b0513a25a48dc2c9c",
-  "tag": "gkoi-2026.11.18-1"
+  "source_sha256": "126b7d0155a8eb01654207db8e0d4b61080fb463d8204f9212ceebd13e08efe4",
+  "tag": "gkoi-2026.11.18-2"
 }
