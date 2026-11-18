@@ -216,6 +216,55 @@ variable "create_engine_internal_alb" {
   default     = true
 }
 
+# --- the private service calls (SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1; envs/prod2/PRIVATE-SERVICE-CALLS-RUNBOOK.md) ----
+
+variable "create_private_service_listeners" {
+  description = <<-EOT
+    true = the internal ALB (create_engine_internal_alb) gains two plain-HTTP listeners that only the ECS tasks SG may
+    reach: private_engine_port → the engine api's own :3000 (/api/* and /ws/* only — never /internal/*) and
+    private_files_port → a new target group gkoi-prod2-fm-api-int (fm-api :3200, /api/* only). Inert alone: nothing
+    calls them until compute's private_files_calls / private_engine_calls are turned on. Output private_services
+    (null while off). Rollback: false + apply (after compute's two call flags are back to false).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "private_engine_port" {
+  description = "The internal ALB listener port the site reaches the engine api on (create_private_service_listeners)."
+  type        = number
+  default     = 3100
+  validation {
+    condition     = var.private_engine_port >= 1024 && var.private_engine_port <= 65535 && var.private_engine_port != 3000
+    error_message = "private_engine_port: 1024–65535 and not 3000 (the media boxes' listener)."
+  }
+}
+
+variable "private_files_port" {
+  description = "The internal ALB listener port the site reaches the file manager api on (create_private_service_listeners)."
+  type        = number
+  default     = 3200
+  validation {
+    condition     = var.private_files_port >= 1024 && var.private_files_port <= 65535 && var.private_files_port != 3000
+    error_message = "private_files_port: 1024–65535 and not 3000 (the media boxes' listener)."
+  }
+}
+
+variable "engine_internal_idle_timeout" {
+  description = <<-EOT
+    The internal ALB's idle timeout (s). 60 = today. 300 = the public ALB's value (var.idle_timeout): wanted once the
+    site's chat WebSocket goes through this ALB (compute private_engine_calls), because the engine's chat gateway sends
+    no pings and an idle socket would be cut at 60 s (SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1 P4 / Q3). The agents' and
+    the site's HTTP keep-alive (55 s) stay below either value. In-place change, no replacement.
+  EOT
+  type        = number
+  default     = 60
+  validation {
+    condition     = var.engine_internal_idle_timeout >= 60 && var.engine_internal_idle_timeout <= 4000
+    error_message = "engine_internal_idle_timeout: 60–4000 s (below 60 would cut the 55 s keep-alive sockets)."
+  }
+}
+
 variable "fm_publisher_cidrs" {
   description = <<-EOT
     Build boxes that publish to the file manager with a scoped BUILD KEY (fm-publish; GKOI Live's cook boxes). They may

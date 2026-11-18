@@ -41,3 +41,8 @@ output "endpoints_security_group_id" {
 output "s3_endpoint_id" {
   value = aws_vpc_endpoint.s3.id
 }
+
+output "private_cidrs" {
+  description = "The private subnets' CIDRs, in AZ order (what an internal ALB's nodes and the ECS tasks are addressed from)."
+  value       = local.private_cidrs
+}

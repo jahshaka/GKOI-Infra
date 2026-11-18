@@ -298,6 +298,9 @@ module "fm_api" {
     container_name   = "api"
     container_port   = 3200
   }
+  # The site's private door (SPEC-INFRA-PRIVATE-SERVICE-CALLS-V1 P3): edge-alb's internal ALB :3200 → fm-api :3200.
+  # Absent until edge-alb is applied with create_private_service_listeners (try in main.tf): no change before that.
+  extra_load_balancers              = local.fm_private_lbs
   health_check_grace_period_seconds = 60
 
   min_capacity          = local.is_parked["fm-api"] ? 0 : (local.tg["fm-api"].min_capacity)
