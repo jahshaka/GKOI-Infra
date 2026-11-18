@@ -496,7 +496,7 @@ count, the live-records switch, the rehearsal switch; the runs share one state, 
 | m7i.xlarge | ~$147 | ~$168 | ~$147 | **$190** ($0.2604/h, Pricing API 2026-11-11) |
 | gp3 100 GiB | ~$8 | ~$9.5 | ~$8 | $9.6 ($0.096/GB-mo, Pricing API) |
 | Elastic IP (public IPv4) | ~$3.6 | ~$3.6 | ~$3.6 | ~$3.6 |
-| CloudWatch: ~20 agent metrics (ASG + instance aggregations) + 4 alarms + log ingestion | ~$7 + logs | ~$7 + logs | ~$7 + logs | ~$7 + logs (Tokyo ingestion ~$0.76/GB) |
+| CloudWatch: ~20 agent metrics (ASG aggregation; network: the main interface only — template 2026-11-18, on a box after its next `apply --only config,cloudwatch`) + 4 alarms + log ingestion | ~$7 + logs | ~$7 + logs | ~$7 + logs | ~$7 + logs (Tokyo ingestion ~$0.76/GB) |
 | **Region** | **~$166** | **~$188** | **~$166** | **~$210** |
 
 Once (in edge-alb): the internal ALB ~$16.4 + LCUs (~$5) ≈ **$22**. All three ≈ **$540/month** (+ egress: platform relays

@@ -10,12 +10,12 @@
       "InstanceId": "${aws:InstanceId}",
       "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
     },
-    "aggregation_dimensions": [["AutoScalingGroupName"], ["InstanceId"]],
+    "aggregation_dimensions": [["AutoScalingGroupName"]],
     "metrics_collected": {
       "cpu": { "totalcpu": true, "measurement": ["usage_active", "usage_iowait", "usage_steal"] },
       "mem": { "measurement": ["mem_used_percent", "mem_available"] },
       "disk": { "resources": ["/"], "measurement": ["used_percent", "inodes_used"], "ignore_file_system_types": ["sysfs", "devtmpfs", "tmpfs", "overlay", "squashfs"] },
-      "net": { "resources": ["*"], "measurement": ["bytes_sent", "bytes_recv"] },
+      "net": { "resources": ["enp39s0", "ens5", "eth0"], "measurement": ["bytes_sent", "bytes_recv"] },
       "netstat": { "measurement": ["tcp_established"] }
     }
   },
