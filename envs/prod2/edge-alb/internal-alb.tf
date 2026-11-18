@@ -167,7 +167,7 @@ resource "aws_vpc_security_group_egress_rule" "engine_internal_to_fm_tasks" {
 resource "aws_vpc_security_group_ingress_rule" "tasks_from_engine_internal_fm" {
   count                        = local.private_listeners ? 1 : 0
   security_group_id            = local.net.ecs_tasks_security_group_id
-  description                  = "Engine internal ALB to fm-api 3200 (the site's private calls)"
+  description                  = "Engine internal ALB to fm-api 3200 (private calls from the site)"
   ip_protocol                  = "tcp"
   from_port                    = 3200
   to_port                      = 3200
