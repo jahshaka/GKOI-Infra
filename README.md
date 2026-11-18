@@ -324,7 +324,7 @@ until C16 is proven on two tasks.
 | Service | Containers (port) | Size | Notes |
 |---|---|---|---|
 | `cms` | `cache-init` (one shot) → `server` (8090) → `nginx` (8080 → target group `cms`) | 1 vCPU / 2 GB | EFS access point `/cms-content` at `/data/content`: read-write in `server`, READ-ONLY in `nginx`. A task volume `/data/nginx-cache` shared by both (the server purges what nginx caches); `cache-init` (the nginx image as root) hands it to uid 33 first, because a Fargate task volume starts root:0755. nginx waits for the server to be HEALTHY. |
-| `engine-api` | `api` (3000) + `edge` (8080 → target group `engine-api`) | 1 vCPU / 2 GB | SPEC-ENGINE-EDGE-SIDECAR-V1. `engine_edge_sidecar = false` = the api alone on 3000 (a rehearsal before the edge image exists). The api trusts only 127.0.0.1 with the edge, the VPC CIDR without it. |
+| `engine-api` | `api` (3000) + `edge` (8080 → target group `engine-api`) | 0.5 vCPU / 1 GB | SPEC-ENGINE-EDGE-SIDECAR-V1. `engine_edge_sidecar = false` = the api alone on 3000 (a rehearsal before the edge image exists). The api trusts only 127.0.0.1 with the edge, the VPC CIDR without it. |
 | `engine-worker` | `worker` | 1 vCPU / 2 GB, **60 GiB** ephemeral | The Download MP4 build's scratch is a task volume at `/scratch/vod-build` (`VOD_BUILD_DIR`). Worst case 130 min × 12 Mb/s ≈ 11.7 GB; the build needs ~2.2× ≈ 25.7 GB + the 2 GB reserve ≈ 27.7 GB, plus the image layers on the same disk: 60 GiB = 2× headroom. |
 | `fm-api` | `api` (3200 → target group `fm-api`) | 0.5 vCPU / 1 GB | |
 | `fm-worker` | `worker` | 0.5 vCPU / 2 GB | compose caps it at 1536 MiB |
@@ -420,12 +420,12 @@ It runs (min 1, ~$9/month) only because the target group exists; `fm_web_enabled
 | Service | Size | ≈ $/month |
 |---|---|---|
 | cms | 1 vCPU / 2 GB | 36.0 |
-| engine-api | 1 vCPU / 2 GB | 36.0 |
+| engine-api | 0.5 vCPU / 1 GB | 18.0 |
 | engine-worker | 1 vCPU / 2 GB + 40 GB extra ephemeral ($0.000111/GB-h) | 39.3 |
 | fm-api | 0.5 vCPU / 1 GB | 18.0 |
 | fm-worker | 0.5 vCPU / 2 GB | 21.3 |
 | fm-web | 0.25 vCPU / 0.5 GB | 9.0 |
-| **Total** | | **≈ $160** (+ 25 secrets ≈ $10, Container Insights, log ingestion; migrators cost seconds) |
+| **Total** | | **≈ $142** (+ 25 secrets ≈ $10, Container Insights, log ingestion; migrators cost seconds) |
 
 ### Things to decide / know before the first apply
 

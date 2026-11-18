@@ -75,7 +75,7 @@ variable "sizes" {
   }))
   default = {
     cms            = { cpu = 1024, memory = 2048 }
-    engine-api     = { cpu = 1024, memory = 2048 }
+    engine-api     = { cpu = 512, memory = 1024 } # 2026-11-18: was 1024 / 2048; 7-day max CPU 26.9 %, memory 6.9 % (transport audit §4.8-C)
     engine-worker  = { cpu = 1024, memory = 2048 }
     fm-api         = { cpu = 512, memory = 1024 }
     fm-worker      = { cpu = 512, memory = 2048 } # compose: mem_limit 1536m
