@@ -394,7 +394,7 @@ variable "private_files_calls" {
     create_private_service_listeners. Rollback: false + apply.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "private_engine_calls" {
