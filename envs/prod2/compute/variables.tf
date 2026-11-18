@@ -383,7 +383,7 @@ variable "engine_trust_private_callers" {
     every proxied viewer would look like one CMS address and the engine's per-address limits would throttle them all).
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "private_files_calls" {
