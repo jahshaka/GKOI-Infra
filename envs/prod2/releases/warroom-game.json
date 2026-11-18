@@ -1,14 +1,14 @@
 {
-  "built_at": "2026-11-16T04:38:48Z",
-  "codebuild_build_id": "gkoi-build-warroom-game:0395162e-bab2-4393-8a5d-f7f8e67f0931",
-  "commit": "f53af15e8a9867aacdfd3233c90ce766fcc64668",
+  "built_at": "2026-11-18T11:37:19Z",
+  "codebuild_build_id": "gkoi-build-warroom-game:6c91cebe-e097-4450-978b-8f4ad157bade",
+  "commit": "498e0b77bafc915062b526ff4e1c37e770009f6f",
   "images": {
     "warroom-game": {
-      "digest": "sha256:6b1f489203242fc373d77da736fc7a041da46743e2cec77f6a4870f90877dc93",
-      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/warroom-game@sha256:6b1f489203242fc373d77da736fc7a041da46743e2cec77f6a4870f90877dc93"
+      "digest": "sha256:73b5f9309a701d68003ba0b699dcaa5d568ddb84fa4eeb02e010725c615715b5",
+      "image": "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/warroom-game@sha256:73b5f9309a701d68003ba0b699dcaa5d568ddb84fa4eeb02e010725c615715b5"
     }
   },
   "repo": "warroom-game",
-  "source_sha256": "556012e0939264957911ea82007b4e2a8b579720774d8cbdfa159461ac568483",
-  "tag": "1.0.16.4-h10"
+  "source_sha256": "1bfc475eddffeccd4707705c573fdc3f5eccf8b52b826ca2e156eb523e1c6022",
+  "tag": "1.0.16.5-h11"
 }
