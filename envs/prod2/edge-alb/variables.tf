@@ -227,7 +227,7 @@ variable "create_private_service_listeners" {
     (null while off). Rollback: false + apply (after compute's two call flags are back to false).
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "private_engine_port" {

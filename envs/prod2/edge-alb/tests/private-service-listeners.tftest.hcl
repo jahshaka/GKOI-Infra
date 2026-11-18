@@ -142,6 +142,9 @@ variables {
 # Flag off (the default): NOTHING new, and what exists is today's.
 run "flag_off_adds_nothing" {
   command = apply
+  variables {
+    create_private_service_listeners = false
+  }
   assert {
     condition = (
       length(aws_vpc_security_group_ingress_rule.engine_internal_from_tasks) == 0 &&
@@ -342,6 +345,7 @@ run "idle_timeout_300" {
   command = apply
   variables {
     engine_internal_idle_timeout = 300
+    create_private_service_listeners = false
   }
   assert {
     condition     = aws_lb.engine_internal[0].idle_timeout == 300 && length(aws_lb_listener.private_engine) == 0 && output.private_services == null
