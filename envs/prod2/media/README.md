@@ -482,6 +482,87 @@ API) ≈ $0.31 per platform per stream-hour; EC2 → CloudFront free. **≈ $215
 $750/month (the plan budgeted ~$650 for four). Latency: Tokyo → Oregon is ~100 ms per round trip for the publish-auth,
 the 5-s heartbeats and the BullMQ calls to Valkey (G4: keep-alive set; G5's regional api would remove it).
 
+## The one ingest address + SRT (1.1.8)
+
+GKOIBuilder_AI `docs/specs/SPEC-ONE-INGEST-ADDRESS-V1.md` (§14 is binding), its audit (B4 certificates, B5 the DNS swap)
+and `docs/runbooks/PROD-118-STOPPED-RELEASE-DRAFT.md` §5. **Applied ONLY inside the 1.1.8 stopped release, on the
+operator's go** (operator 2026-11-25: no AWS change ahead of the release). Every variable below DEFAULTS TO TODAY: with
+all of them at their defaults a plan changes nothing but the box bundle's script bytes (`aws_s3_object.bundle` + the
+`bundle.files` hashes inside each `/gkoi/prod2/media/<key>/config` — the boxes behave exactly as before; the new
+bootstrap code only runs on config keys that are absent at the defaults).
+
+| Variable (media unless named) | Default | 1.1.8 value | What it does |
+|---|---|---|---|
+| `ingest_regional_stream_hosts` | `{}` | `{ usw2 = "stream-usw2.gkoi.com" }` | Oregon's stream host (registered `publicHost`, WebRTC `MTX_WEBRTCADDITIONALHOSTS`, the RTMPS lineage) becomes `stream-usw2`; + its A record → Oregon's EIP. `stream.gkoi.com` stays a managed plain A record (→ Oregon) until the swap. |
+| `ingest_auto_host` | `""` | `stream.gkoi.com` | every box's stream lineage gets the name as a 2nd SAN (one lineage, named for the box's stream host, `-d <regional> -d stream.gkoi.com --expand`; the bootstrap compares the certificate's NAME SET and re-issues on a difference, then restarts the idle pools); DNS-01 IAM scope + the name; agents: `INGEST_AUTO_HOST`, `INGEST_ACCEPTING_METRIC=1`; per region: 2 metric filters → `GKOI/Media IngestAccepting`, the alarm `gkoi-prod2-media-<key>-ingest-not-accepting` (60 s, 2 of 3, missing = breaching), 3 Route 53 health checks (TCP pool-0 RTMPS 11936 10 s × 3 from 3 checker regions; CLOUDWATCH_METRIC on the alarm, insufficient data = unhealthy; CALCULATED = both) |
+| `ingest_srt` | `false` | `true` | udp 18890 / 28890 open to the world on every box; compose publishes each pool's `:8890/udp` there; each pool registers `publicSrtPort` (the pools' SRT listener is already on: `pool.yml` `srt: yes`, the patched `+gkoi` MediaMTX) |
+| `ingest_geoip_country_file` | `""` | `/app/geoip/dbip-country-lite.csv` | `GEOIP_COUNTRY_FILE` of every agent. The file is IN THE MEDIA-AGENT IMAGE (engine repo, below) — this stack only names the path |
+| `cert_renewal_alarms` | `false` | `true` | per box: a metric filter on `…/bootstrap` (certbot's log ships there) for `Failed to renew certificate` / `All renewals failed` / the bootstrap's `certbot could not (re-)issue`, and the alarm `…-cert-failure` (≥ 1 in an hour) |
+| `ingest_auto_latency_records` | `false` | `true` AFTER the swap | the four latency records of `stream.gkoi.com` (`module.box_<key>[0].aws_route53_record.auto[0]`, prevent_destroy); the plain record leaves Oregon's live map |
+| compute `ingest_auto_host` (+ `ingest_auto_rtmps_port` 11936, `ingest_auto_srt_port` 18890) | `""` | `stream.gkoi.com` | the api / worker / migrator env `INGEST_AUTO_HOST`, `INGEST_AUTO_RTMPS_PORT`, `INGEST_AUTO_SRT_PORT` (a registry-only engine hands out no `auto` without the explicit ports) |
+
+**The country file (engine repo, BEFORE the release build).** `infra/docker/media-agent.Dockerfile`, runtime stage:
+the DB-IP "IP to Country Lite" CSV of the month at `/app/geoip/dbip-country-lite.csv` — plain CSV, NOT the `.gz`
+(the agent reads text; `geoCountry.ts`). Either commit the `.csv.gz` (≈ 5 MB) and gunzip it in the build stage, or
+`ADD --checksum=sha256:<…> https://download.db-ip.com/free/dbip-country-lite-2026-11.csv.gz` + gunzip (pinned checksum,
+no network at boot). CC-BY 4.0: the attribution line is the website's admin view's. Chosen over an S3 object fetched at
+boot because the spec puts it in the image (§14.12 f), it needs no IAM / bootstrap / upload step here, and the image is
+rebuilt every release anyway (the monthly refresh rides a release). A missing file is harmless: one error line, every
+country unknown.
+
+### Order inside the stop (everything is down; runbook §5)
+
+| # | Step | Check (each must pass before the next) |
+|---|---|---|
+| 1 | Commit the five media values above (NOT `ingest_auto_latency_records`); `tools/gkoi-infra-run media plan` — expect **41 to add, 11 to change, 0 to destroy** (review plan 2026-11-25): per region 10 = 2 SRT SG rules, 3 metric filters (accepting 0 / 1, cert failure), 2 alarms, 3 health checks; + `module.box_usw2[0].aws_route53_record.live["stream-usw2.gkoi.com"]`; in place: the 4 config parameters, the 4 box policies (DNS-01 scope), 2 bundle objects, `terraform_data.preflight`. Anything destroyed = stop. Then `apply`. This also creates `stream-usw2.gkoi.com` (A → Oregon's EIP). Can be the SAME apply as the release's image bump (§4.2). | `for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @$r stream-usw2.gkoi.com; done` → `32.188.243.42` three times (do NOT dig it before it exists: the zone caches NXDOMAIN for 900 s). `aws ec2 describe-security-group-rules --region <r> --filters Name=group-id,Values=<box sg> --query "SecurityGroupRules[?IpProtocol=='udp'].[FromPort,CidrIpv4]"` → 8189, 8289, **18890, 28890** |
+| 2 | Roll **Oregon FIRST** (its WebRTC host and certificate change): `roll.sh --drain-wait 60` over SSM (README "Releases"). Phase certs issues the `stream-usw2.gkoi.com` lineage with both names, then the pools come up on it. | on the box `media-bootstrap.sh check` → `cert: stream-usw2.gkoi.com names stream-usw2.gkoi.com stream.gkoi.com` and exit 0. From outside: `openssl s_client -connect 32.188.243.42:11936 -servername stream.gkoi.com </dev/null 2>/dev/null \| openssl x509 -noout -ext subjectAltName` → `DNS:stream-usw2.gkoi.com, DNS:stream.gkoi.com` (both names); `nc -vz stream-usw2.gkoi.com 11936` → open |
+| 3 | Roll euc1, then use1, then apne1 — ONE box at a time (each re-issues its lineage with `stream.gkoi.com` by DNS-01; four boxes write the same `_acme-challenge.stream.gkoi.com` TXT name — one at a time avoids the collision; Let's Encrypt's duplicate limit is 5 / week per exact name set, and every set differs) | the same `check` + `openssl s_client -connect <EIP>:11936 -servername stream.gkoi.com …` → `DNS:stream-<r>.gkoi.com, DNS:stream.gkoi.com`; SRT: the pool's registry entry carries `publicSrtPort` (`redis-cli GET relay:registry:pool:<box>-p0` from an ECS Exec shell) |
+| 4 | After the agents run (≥ 3 minutes): the health checks | `aws cloudwatch describe-alarms --region <r> --alarm-names gkoi-prod2-media-<key>-ingest-not-accepting --query 'MetricAlarms[0].StateValue'` → `OK`; `aws route53 get-health-check-status --health-check-id <terraform output ingest … health_check_id>` → every checker `Success`. `ALARM` = read the agent's `ingest accepting` line's `reasons` (CloudWatch …/container) |
+| 5 | compute: commit `ingest_auto_host = "stream.gkoi.com"`; `tools/gkoi-infra-run compute plan` → only the engine task definitions (+ 3 env values) and their services; apply. AFTER the media agents (the engine env example's deploy order). | `healthz`; a stream key's lists carry `auto` first (`stream.gkoi.com:11936` / `:18890`) |
+| 6 | The DNS swap: `terraform output -json ingest > ingest.json` (media) → `tools/gkoi-one-ingest-dns-swap ingest.json` PRINTS the checks, the ONE change batch (DELETE the plain A + CREATE the four latency records), the `terraform state rm` + four `terraform import` lines, and the rollback batch. Submit the batch (write credentials), then the state lines from the commit that sets `ingest_auto_latency_records = true`; `gkoi-infra-run media plan` → no record created or destroyed | `for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @$r stream.gkoi.com; done` → ONE address each (from here: Oregon's); `aws route53 test-dns-answer … --edns0-client-subnet-ip <a German / US-East / Japanese address>` → that region's EIP; the health checks still green |
+| 7 | The prod proof (spec §10) + the operator's VPN pass | the admin "Ingest accuracy" view |
+
+**When a certificate does not issue** (DNS-01 refused, rate limit, Let's Encrypt down): phase certs stops the roll
+BEFORE env / compose, so that box keeps running on its previous config (old lineage, old names) — nothing is broken.
+Then the automatic address is LEFT OFF for this release: compute `ingest_auto_host = ""` (the api lists no `auto`), no
+DNS swap (`stream.gkoi.com` stays a plain record → Oregon), and the regional names carry the release. If it was
+**Oregon's** new lineage that failed, also drop the rename (`ingest_regional_stream_hosts = {}`) and re-apply + roll, so
+Oregon serves `stream.gkoi.com` on its existing lineage as today. The `…-cert-failure` alarm and
+`/var/log/letsencrypt/letsencrypt.log` (→ CloudWatch …/bootstrap, stream `<instance>-certbot`) say why. Retry
+later, one box at a time; `acme_staging = true` proves the DNS-01 path without spending the weekly limit.
+
+**When a pool's ports ever change** (SRT added now; a pool count or port formula later) — the engine audit's rule: the
+engine compares every region's first pool against the automatic ports, so a stale registry entry with the old ports
+keeps `auto` out of the lists. Clear the box's old registry entries (`DEL relay:registry:pool:<box>-p<i>` +
+`SREM relay:registry:pools …`, or let them lapse: TTL 30 s once the old agent is gone — in the blackout they lapse on
+their own) or set the explicit `INGEST_AUTO_*_PORT` (compute). And `pool_count` must stay ≥ 1 with pool 0 on 11936 /
+18890 in every region (the automatic entry is pool 0's port everywhere — spec §14.4).
+
+**Costs** (list prices from memory): 12 Route 53 health checks (4 TCP fast-interval ≈ $2 + 4 alarm-based + 4
+calculated ≈ $0.50–1 each) + 8 alarms ≈ **$10–15 / month**; the TCP checks open ~1 connection per checker every 10 s on
+pool 0 — two RTMPS log lines each (`opened` / `closed: EOF`) shipped to …/container (≈ tens of MB / month per box).
+
+**Not verified without a write** (the rehearsal / the day): the `$.log` regex filter against a live `IngestAccepting`
+line (the Docker wrapper `{"log": …}` WAS checked on a live box, 2026-11-25; the agent's line format from the engine
+code); certbot's `--expand` on an existing ECDSA one-name lineage non-interactively; the regex-filter quota (5 per log
+group — `DescribeMetricFilters` is denied to the orchestrator role, so existing filters were not listed); Route 53's
+alarm-check timing end to end (spec §5: 2–4 min + TTL); that no other session queries `stream-usw2` before step 1.
+
+### Review plan (2026-11-25, read-only — `-refresh=false -lock=false`, no saved plan)
+
+The orchestrator role cannot read some data sources (the AMI parameter, the CloudFront prefix list, the secrets'
+resource policies) nor refresh the roles / objects, so the plans ran with `-refresh=false` on a scratch copy whose
+unreadable data sources were pinned to the values the last apply recorded (ids / ARNs). They show what the CODE
+changes against the state, not live drift. Defaults: media **0 / 11 / 0** (origin/main itself: 0 / 10 / 0 — its
+`cloudwatch-agent.json.tmpl` bundle object and the four config parameters are an unapplied main change; the four box
+policies show as updates only because their document is "read during apply"); this branch adds only
+`aws_s3_object.bundle["media-bootstrap.sh"]`. compute: **No changes** (main and branch). Feature on (before the swap):
+media **41 / 11 / 0** (above); compute `ingest_auto_host` on: **3 / 2 / 3** — the three engine task definitions
+(api, worker, migrate) are REPLACED (task definitions are immutable: a new revision, the old one deregistered — every
+env change looks like this; `--allow-destroy`) and the two services updated in place. With
+`ingest_auto_latency_records = true` and no state operation the plan STOPS on prevent_destroy of
+`live["stream.gkoi.com"]` — as designed (step 6 first).
+
 ## Validate (offline)
 
 `terraform fmt -check`, `validate` (`init -backend=false`) and `terraform test` (tests/plan.tftest.hcl: mock providers,

@@ -33,3 +33,8 @@ output "launch_template_version" {
 output "records" {
   value = concat([for r in aws_route53_record.rehearsal : r.fqdn], [for r in aws_route53_record.live : r.fqdn])
 }
+
+output "auto_health_check_id" {
+  description = "The CALCULATED health check of this region's member of the automatic name (null while auto_host is off)."
+  value       = try(aws_route53_health_check.auto[0].id, null)
+}

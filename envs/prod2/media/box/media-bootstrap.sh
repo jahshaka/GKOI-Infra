@@ -23,7 +23,10 @@
 #              certbot → /gkoi/prod2/media/<key>/*; cpu / mem / disk / net → GKOI/Media by AutoScalingGroupName
 #   certs      Let's Encrypt by DNS-01 through Route 53 with the INSTANCE ROLE, one lineage per name in cert_hosts
 #              (/etc/letsencrypt/live/<host>/ — the pools' RTMPS and the media origin read exactly that path); the
-#              deploy hook (cert-hook.sh) + the hourly retry timer for a pool restart deferred by live sessions
+#              deploy hook (cert-hook.sh) + the hourly retry timer for a pool restart deferred by live sessions.
+#              A lineage with extra names in the config's cert_sans (1.1.8: the stream host + the automatic name) is
+#              checked by its certificate's NAME SET, not by the file: a different set is re-issued (--expand) and
+#              cert-hook.sh restarts the pools / reloads the origin that read it (pools only while the box is idle)
 #   env        the secrets (Secrets Manager, us-west-2) → /etc/gkoi-media/{agent,pool,origin}.env (0600, root); the
 #              box-local resolver secret (generated once); MEDIA_BOX_ID + MEDIA_BOX_INSTANCES from IMDS
 #   compose    the compose file → /opt/gkoi-media/run/compose.yml; ECR login; pull by digest; up -d; wait healthy.
@@ -273,18 +276,50 @@ phase_cloudwatch() {
 }
 
 # =====================================================================================================================
+cert_extra_names() { # LINEAGE → the extra names the config wants on it (cert_sans; none = today's one-name lineage)
+  jq -r --arg h "$1" '((.cert_sans // {})[$h] // [])[]' "$CFG"
+}
+
+cert_names_on_disk() { # LINEAGE → the DNS names its certificate carries, sorted, one per line (nothing when there is none)
+  local f="/etc/letsencrypt/live/$1/cert.pem"
+  [ -s "$f" ] || return 0
+  openssl x509 -noout -ext subjectAltName -in "$f" 2>/dev/null | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p' | sort -u
+}
+
+cert_want_names() { # LINEAGE → the names it must carry (itself + cert_sans), sorted, one per line
+  { printf '%s\n' "$1"; cert_extra_names "$1"; } | sort -u
+}
+
 phase_certs() {
-  local h email staging args=()
+  local h n email staging want have args=() dargs=() reissued=()
   [ ! -e /root/.aws/credentials ] || die "certs: /root/.aws/credentials exists — the DNS-01 must use the instance role, never static keys"
   email="$(cfg_or .acme.email '')"; staging="$(cfg_or .acme.staging false)"
   if [ -n "$email" ]; then args+=(--email "$email"); else args+=(--register-unsafely-without-email); fi
   [ "$staging" = true ] && args+=(--staging)
   while read -r h; do
     [[ "$h" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || die "cert host '$h' is not a DNS name"
-    if [ -s "/etc/letsencrypt/live/$h/fullchain.pem" ]; then continue; fi
-    say "certs: issuing $h (DNS-01, Route 53, the instance role)"
-    certbot certonly --non-interactive --agree-tos --dns-route53 --key-type ecdsa \
-      --cert-name "$h" -d "$h" "${args[@]}" >/dev/null || die "certbot could not issue $h (see /var/log/letsencrypt/letsencrypt.log)"
+    if [ -z "$(cert_extra_names "$h")" ]; then
+      # One name (today): the file decides.
+      if [ -s "/etc/letsencrypt/live/$h/fullchain.pem" ]; then continue; fi
+      say "certs: issuing $h (DNS-01, Route 53, the instance role)"
+      certbot certonly --non-interactive --agree-tos --dns-route53 --key-type ecdsa \
+        --cert-name "$h" -d "$h" "${args[@]}" >/dev/null || die "certbot could not issue $h (see /var/log/letsencrypt/letsencrypt.log)"
+      continue
+    fi
+    # Extra names (1.1.8: the automatic name): the certificate's NAME SET decides (audit B4 — a file check would never
+    # re-issue an existing one-name lineage).
+    want="$(cert_want_names "$h")"
+    while read -r n; do [[ "$n" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || die "cert name '$n' (cert_sans of $h) is not a DNS name"; done <<< "$want"
+    have="$(cert_names_on_disk "$h")"
+    [ "$have" = "$want" ] && continue
+    dargs=(-d "$h")
+    while read -r n; do [ "$n" = "$h" ] || dargs+=(-d "$n"); done <<< "$want"
+    say "certs: (re)issuing lineage $h for: $(tr '\n' ' ' <<< "$want")(had: $(tr '\n' ' ' <<< "${have:-none}"))"
+    certbot certonly --non-interactive --agree-tos --dns-route53 --key-type ecdsa --expand \
+      --cert-name "$h" "${dargs[@]}" "${args[@]}" >/dev/null || die "certbot could not re-issue $h (see /var/log/letsencrypt/letsencrypt.log)"
+    have="$(cert_names_on_disk "$h")"
+    [ "$have" = "$want" ] || die "certs: lineage $h carries '$(tr '\n' ' ' <<< "$have")' after the re-issue, not '$(tr '\n' ' ' <<< "$want")'"
+    reissued+=("$h")
   done < <(jq -r '.cert_hosts[]' "$CFG")
   write_file 0755 /etc/letsencrypt/renewal-hooks/deploy/gkoi-media <<EOF || true
 #!/bin/sh
@@ -313,6 +348,12 @@ EOF
   systemctl enable --now gkoi-media-cert-retry.timer >/dev/null 2>&1 || warn "cert retry timer not enabled"
   local timer; timer="$(certbot_renew_timer)"
   systemctl is-enabled --quiet "$timer" 2>/dev/null || warn "certbot's renew timer ($timer) is not enabled"
+  # A re-issued lineage is NOT run through certbot's deploy hook (certonly): the running pools would keep the old
+  # certificate in memory (MediaMTX reads it at start). Same rule as a renewal: the origin reloads, the pools restart
+  # only while the box is idle (roll.sh drains first), else the hourly retry.
+  for h in "${reissued[@]}"; do
+    RENEWED_LINEAGE="/etc/letsencrypt/live/$h" "$TOOL/cert-hook.sh" || warn "certs: cert-hook.sh failed for the re-issued $h"
+  done
   say "certs: $(jq -r '.cert_hosts | join(", ")' "$CFG")"
 }
 
@@ -340,14 +381,17 @@ secret() { # ENV_NAME → the value (never printed by the caller)
 box_instances_json() { # → MEDIA_BOX_INSTANCES (the pools THIS box runs; the engine reads every field from the registry)
   local box ip
   box="$(box_id)" || die "no instance id"; ip="$(private_ip)" || die "no private ip"
+  # 1.1.8 (config .srt): + publicSrtPort (i+1)8890 — the pool's :8890/udp as compose publishes it (compose_render).
   jq -c --arg box "$box" --arg ip "$ip" '
-    [ range(0; .pool_count) as $i
+    (.srt // false) as $srt
+    | [ range(0; .pool_count) as $i
       | (($i + 1) * 10000) as $b
       | { id: "\($box)-p\($i)", region: .region, label: .label,
           controlBaseUrl: "http://mk-pool-\($i):9997", internalHost: "mk-pool-\($i)",
           publicHost: .stream_host, publicRtmpPort: ($b + 1935), publicRtmpsPort: ($b + 1936),
           apiHost: $ip, apiHlsPort: ($b + 8888), apiWhipPort: ($b + 8889),
-          apiControlBaseUrl: "http://\($ip):\($b + 9997)", liveOriginBase: .live_origin_base } ]' "$CFG"
+          apiControlBaseUrl: "http://\($ip):\($b + 9997)", liveOriginBase: .live_origin_base }
+        + (if $srt == true then { publicSrtPort: ($b + 8890) } else {} end) ]' "$CFG"
 }
 
 phase_env() {
@@ -401,9 +445,9 @@ phase_env() {
 
 # =====================================================================================================================
 compose_render() {
-  local agent mtx origin stream origin_host slug ip url n i b pools="" eng
+  local agent mtx origin stream origin_host slug ip url n i b pools="" eng srt srt_line
   agent="$(cfg '.images["media-agent"]')"; mtx="$(cfg .images.mediamtx)"; origin="$(cfg '.images["media-origin"]')"
-  stream="$(cfg .stream_host)"; origin_host="$(cfg .origin_host)"
+  stream="$(cfg .stream_host)"; origin_host="$(cfg .origin_host)"; srt="$(cfg_or .srt false)"
   # The live-origin slug is the ENGINE's regionSlug(region) (mikaido shared/liveOrigin.ts: area + the direction's first
   # letter + the number), NOT this stack's key: us-west-2 → usw2 and us-east-1 → use1 equal their keys, but
   # ap-northeast-1 → apn1 while the key is apne1 (found 2026-11-11: CloudFront /r/apn1/* reached an origin serving /r/apne1/).
@@ -435,6 +479,9 @@ services:
 EOF
   for ((i = 0; i < n; i++)); do
     b=$(((i + 1) * 10000))
+    # 1.1.8 (config .srt): the pool's SRT listener (pool.yml :8890, on by default) published at (i+1)8890/udp
+    srt_line=""
+    if [ "$srt" = true ]; then srt_line=$'\n'"      - \"$((b + 8890)):8890/udp\""; fi
     cat <<EOF
   mk-pool-$i:
     image: $mtx
@@ -454,7 +501,7 @@ EOF
     ports:
       - "$((b + 1935)):1935"
       - "$((b + 1936)):1936"
-      - "$((8189 + 100 * i)):$((8189 + 100 * i))/udp"
+      - "$((8189 + 100 * i)):$((8189 + 100 * i))/udp"$srt_line
       - "$ip:$((b + 8889)):8889"
       - "$ip:$((b + 8888)):8888"
       - "$ip:$((b + 9997)):9997"
@@ -567,6 +614,10 @@ do_check() {
   while read -r h; do
     if end="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$h/fullchain.pem" 2>/dev/null)"; then
       echo "cert: $h until ${end#*=}"
+      if [ -n "$(cert_extra_names "$h")" ]; then # 1.1.8: the lineage's NAME SET must be exactly the wanted one
+        if [ "$(cert_names_on_disk "$h")" = "$(cert_want_names "$h")" ]; then echo "cert: $h names $(cert_want_names "$h" | tr '\n' ' ')"
+        else echo "cert: $h names $(cert_names_on_disk "$h" | tr '\n' ' ')— WANTED $(cert_want_names "$h" | tr '\n' ' ')"; bad=1; fi
+      fi
     else echo "cert: $h MISSING"; bad=1; fi
   done < <(jq -r '.cert_hosts[]' "$CFG")
   for f in agent.env pool.env origin.env; do

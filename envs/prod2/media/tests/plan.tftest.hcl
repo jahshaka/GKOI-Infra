@@ -403,3 +403,112 @@ run "tokyo_default" {
     error_message = "apne1 box"
   }
 }
+
+# ---- SPEC-ONE-INGEST-ADDRESS-V1 (1.1.8) — plans only (the latency records carry prevent_destroy) ----------------------
+
+# The defaults: nothing of 1.1.8 in any config, env, IAM scope or resource.
+run "one_ingest_defaults_are_today" {
+  command = plan
+  assert {
+    condition     = alltrue([for k, c in local.config : !contains(keys(c), "cert_sans") && !contains(keys(c), "srt")])
+    error_message = "no cert_sans / srt key at the defaults"
+  }
+  assert {
+    condition     = length(setintersection(keys(local.agent_env), ["INGEST_AUTO_HOST", "INGEST_ACCEPTING_METRIC", "GEOIP_COUNTRY_FILE"])) == 0
+    error_message = "no 1.1.8 agent env at the defaults"
+  }
+  assert {
+    condition     = alltrue([for k, c in local.config : jsonencode(local.acme_names[k]) == jsonencode(c.cert_hosts)])
+    error_message = "the DNS-01 scope = cert_hosts at the defaults (IAM unchanged)"
+  }
+  assert {
+    condition     = local.config.usw2.stream_host == "stream.gkoi.com" && jsonencode(local.live_records.usw2) == jsonencode(["stream.gkoi.com", "origin-live-usw2.gkoi.com"])
+    error_message = "Oregon still serves stream.gkoi.com"
+  }
+  assert {
+    condition     = output.ingest.auto_host == "" && alltrue([for k, r in output.ingest.regions : r.health_check_id == null])
+    error_message = "no health checks at the defaults"
+  }
+}
+
+# The stop, before the DNS swap: Oregon renamed, the automatic name on every certificate + agent, SRT, GeoIP, alarms.
+run "one_ingest_before_swap" {
+  command = plan
+  variables {
+    ingest_regional_stream_hosts = { usw2 = "stream-usw2.gkoi.com" }
+    ingest_auto_host             = "stream.gkoi.com"
+    ingest_srt                   = true
+    ingest_geoip_country_file    = "/app/geoip/dbip-country-lite.csv"
+    cert_renewal_alarms          = true
+  }
+  assert {
+    condition     = local.config.usw2.stream_host == "stream-usw2.gkoi.com" && local.config.euc1.stream_host == "stream-euc1.gkoi.com"
+    error_message = "Oregon serves stream-usw2; the others keep their names"
+  }
+  assert {
+    condition     = jsonencode(sort(local.live_records.usw2)) == jsonencode(["origin-live-usw2.gkoi.com", "stream-usw2.gkoi.com", "stream.gkoi.com"])
+    error_message = "Oregon: + stream-usw2, the plain stream.gkoi.com record KEPT until the swap"
+  }
+  assert {
+    condition     = jsonencode(local.config.usw2.cert_sans) == jsonencode({ "stream-usw2.gkoi.com" = ["stream.gkoi.com"] }) && jsonencode(local.config.apne1.cert_sans) == jsonencode({ "stream-apne1.gkoi.com" = ["stream.gkoi.com"] })
+    error_message = "one lineage per box, named for its stream host, + the automatic name"
+  }
+  assert {
+    condition     = contains(local.acme_names.usw2, "stream.gkoi.com") && contains(local.acme_names.usw2, "stream-usw2.gkoi.com") && contains(local.acme_names.euc1, "stream.gkoi.com")
+    error_message = "the DNS-01 scope follows the names"
+  }
+  assert {
+    condition     = !contains(local.config.usw2.cert_hosts, "stream.gkoi.com")
+    error_message = "the old one-name stream.gkoi.com lineage is no longer issued by the bootstrap (the SAN carries the name)"
+  }
+  assert {
+    condition     = local.config.euc1.agent_env.INGEST_AUTO_HOST == "stream.gkoi.com" && local.config.euc1.agent_env.INGEST_ACCEPTING_METRIC == "1" && local.config.euc1.agent_env.GEOIP_COUNTRY_FILE == "/app/geoip/dbip-country-lite.csv"
+    error_message = "agent env"
+  }
+  assert {
+    condition     = local.config.use1.srt == true && local.config.use1.cw.log_prefix == "/gkoi/prod2/media/use1"
+    error_message = "srt in the config; the metric filters' log prefix"
+  }
+  assert {
+    condition     = length(jsonencode(local.config.apne1)) < 3500
+    error_message = "config size ${length(jsonencode(local.config.apne1))}"
+  }
+}
+
+# The latency set without Oregon's rename is refused (a plain A and latency records cannot share a name).
+run "one_ingest_latency_refused_without_rename" {
+  command = plan
+  variables {
+    ingest_auto_host            = "stream.gkoi.com"
+    ingest_auto_latency_records = true
+  }
+  expect_failures = [terraform_data.preflight]
+}
+
+run "one_ingest_latency_refused_without_auto_host" {
+  command = plan
+  variables {
+    ingest_regional_stream_hosts = { usw2 = "stream-usw2.gkoi.com" }
+    ingest_auto_latency_records  = true
+  }
+  expect_failures = [terraform_data.preflight]
+}
+
+# After the swap + import: the plain record is no longer in the map; four latency members.
+run "one_ingest_after_swap" {
+  command = plan
+  variables {
+    ingest_regional_stream_hosts = { usw2 = "stream-usw2.gkoi.com" }
+    ingest_auto_host             = "stream.gkoi.com"
+    ingest_auto_latency_records  = true
+    ingest_srt                   = true
+  }
+  assert {
+    condition     = jsonencode(sort(local.live_records.usw2)) == jsonencode(["origin-live-usw2.gkoi.com", "stream-usw2.gkoi.com"])
+    error_message = "stream.gkoi.com is no longer a plain record"
+  }
+  assert {
+    condition     = output.ingest.latency_records && length(output.ingest.regions) == 4 && output.ingest.regions.apne1.region == "ap-northeast-1"
+    error_message = "four members"
+  }
+}

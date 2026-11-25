@@ -269,6 +269,33 @@ variable "engine_env" {
   default     = {}
 }
 
+# SPEC-ONE-INGEST-ADDRESS-V1 (the 1.1.8 stopped release; envs/prod2/media/README.md "The one ingest address + SRT"):
+# the api's AUTOMATIC ingest entry. "" (the default) = off: the engine env is exactly as before. Set it AFTER the media
+# agents run with media's ingest_auto_host (mikaido docker/mikaido.engine.env.example: agents first, then the api);
+# ROLLBACK: empty it BEFORE rolling any media agent back. A registry-only engine (RELAY_REGISTRY_ONLY=1, prod) needs the
+# explicit ports or it hands out no `auto` entry.
+variable "ingest_auto_host" {
+  description = "INGEST_AUTO_HOST of the api / worker / migrator (stream.gkoi.com); \"\" = unset (today)."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.ingest_auto_host == "" || can(regex("^[a-z0-9-]+(\\.[a-z0-9-]+)+$", var.ingest_auto_host))
+    error_message = "ingest_auto_host: \"\" or a bare host name (no scheme, port or path — the api refuses its boot otherwise)."
+  }
+}
+
+variable "ingest_auto_rtmps_port" {
+  description = "INGEST_AUTO_RTMPS_PORT (only with ingest_auto_host): every region's pool-0 RTMPS port (11936)."
+  type        = number
+  default     = 11936
+}
+
+variable "ingest_auto_srt_port" {
+  description = "INGEST_AUTO_SRT_PORT (only with ingest_auto_host): every region's pool-0 SRT port (18890, media's ingest_srt). null = unset."
+  type        = number
+  default     = 18890
+}
+
 variable "engine_edge_env" {
   description = "Overrides for the edge sidecar (PROVISIONAL names — SPEC-ENGINE-EDGE-SIDECAR-V1 E1; align with lane B's image)."
   type        = map(string)

@@ -6,7 +6,8 @@
 # Ports — copied from the Lightsail media box (2026-11-11: `docker ps` + its firewall; that box was retired 2026-11-17), pool i = 0..pool_count-1:
 #   public   tcp (i+1)1936  RTMPS ingest (MediaMTX terminates TLS)       11936, 21936
 #            udp 8189+100·i WebRTC ICE (WHIP publish, WHEP preview)      8189, 8289
-#            tcp 443        media origin (CloudFront → /r/<slug>/…)      SG `-origin`: CloudFront's prefix list
+#            udp (i+1)8890  SRT ingest — ONLY with srt_enabled (1.1.8)    18890, 28890
+#            tcp 443       media origin (CloudFront → /r/<slug>/…)      SG `-origin`: CloudFront's prefix list
 #   private  tcp (i+1)8888  LL-HLS, (i+1)8889 WHIP/WHEP signalling, (i+1)9997 control API — for the engine api/worker
 #            (the api proxies watch/WHIP/WHEP and reads readiness at the pool's apiHost; DOCKER-USER on the old box
 #            allowed only the control box — here the SG does it: the home ECS tasks only)
@@ -29,6 +30,7 @@ locals {
 
   public_tcp  = [for i in local.pools : (i + 1) * 10000 + 1936]
   public_udp  = [for i in local.pools : 8189 + 100 * i]
+  public_srt  = var.srt_enabled ? [for i in local.pools : (i + 1) * 10000 + 8890] : []
   private_tcp = flatten([for i in local.pools : [(i + 1) * 10000 + 8888, (i + 1) * 10000 + 8889, (i + 1) * 10000 + 9997]])
 
   tags = {
@@ -69,6 +71,17 @@ resource "aws_vpc_security_group_ingress_rule" "ice" {
   for_each          = toset([for p in local.public_udp : tostring(p)])
   security_group_id = aws_security_group.box.id
   description       = "WebRTC ICE/UDP (pool ${floor((tonumber(each.value) - 8189) / 100)})"
+  ip_protocol       = "udp"
+  from_port         = tonumber(each.value)
+  to_port           = tonumber(each.value)
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+# SRT ingest (SPEC-ONE-INGEST-ADDRESS-V1 §14.2): the pool's :8890/udp published as (i+1)8890 — only with srt_enabled.
+resource "aws_vpc_security_group_ingress_rule" "srt" {
+  for_each          = toset([for p in local.public_srt : tostring(p)])
+  security_group_id = aws_security_group.box.id
+  description       = "SRT ingest (pool ${floor(tonumber(each.value) / 10000) - 1})"
   ip_protocol       = "udp"
   from_port         = tonumber(each.value)
   to_port           = tonumber(each.value)
@@ -468,4 +481,140 @@ resource "aws_cloudwatch_metric_alarm" "disk" {
   treat_missing_data  = "missing"
   alarm_actions       = var.alarm_topic_arn == null ? [] : [var.alarm_topic_arn]
   ok_actions          = var.alarm_topic_arn == null ? [] : [var.alarm_topic_arn]
+}
+
+# =================================================================================================================
+# SPEC-ONE-INGEST-ADDRESS-V1 §14.6 / §14.7 (1.1.8) — everything below exists only when its switch is on.
+# =================================================================================================================
+
+locals {
+  auto_on = var.auto_host != ""
+  # The media agent LOGS (it has no CloudWatch client) one line a minute while INGEST_ACCEPTING_METRIC=1:
+  #   {"svc":"media-agent","msg":"ingest accepting","metric":"IngestAccepting","value":1,"box":…,"region":…,"reasons":[],"at":…}
+  # The CloudWatch agent ships Docker's json-file lines as they are, so each event is Docker's wrapper
+  # {"log":"<that line>\n","stream":"stdout","time":…}: the filter reads $.log with a regex (CloudWatch's regex allows no
+  # quote character — \W stands for the `","` and `":` between the fields). Two filters, one per value, into ONE metric.
+  accepting_filters = {
+    "1" = "{ $.log = %IngestAccepting\\W{3}value\\W{2}1\\D% }"
+    "0" = "{ $.log = %IngestAccepting\\W{3}value\\W{2}0\\D% }"
+  }
+}
+
+# --- the IngestAccepting metric: a metric filter on the box's container log group (no code on the box) ------------
+
+resource "aws_cloudwatch_log_metric_filter" "ingest_accepting" {
+  for_each       = local.auto_on ? local.accepting_filters : {}
+  name           = "${local.name}-ingest-accepting-${each.key}"
+  log_group_name = "${var.log_prefix}/container"
+  pattern        = each.value
+  metric_transformation {
+    namespace = "GKOI/Media"
+    name      = "IngestAccepting"
+    value     = each.key
+    unit      = "None"
+    # no default_value: a minute with no line must be MISSING (= breaching), never a 0 or a 1 made up here
+  }
+}
+
+# 1 = this region is a good answer for the automatic name. Missing data = breaching: an agent that stopped logging
+# (dead box, dead agent, metric switched off) takes the region out of the latency set.
+resource "aws_cloudwatch_metric_alarm" "ingest_accepting" {
+  count               = local.auto_on ? 1 : 0
+  alarm_name          = "${local.name}-ingest-not-accepting"
+  alarm_description   = "Media ${var.key}: IngestAccepting < 1 in 2 of 3 minutes (pool 0 down, draining, restoring, not registered, or its certificate lacks ${var.auto_host} / expires within 7 days) — Route 53 takes the region out of ${var.auto_host}"
+  namespace           = "GKOI/Media"
+  metric_name         = "IngestAccepting"
+  statistic           = "Minimum"
+  period              = 60
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+  alarm_actions       = var.alarm_topic_arn == null ? [] : [var.alarm_topic_arn]
+  ok_actions          = var.alarm_topic_arn == null ? [] : [var.alarm_topic_arn]
+  depends_on          = [aws_cloudwatch_log_metric_filter.ingest_accepting]
+}
+
+# --- the Route 53 health checks (global; created through this region's provider) ---------------------------------
+
+resource "aws_route53_health_check" "auto_tcp" {
+  count             = local.auto_on ? 1 : 0
+  type              = "TCP"
+  ip_address        = aws_eip.this.public_ip
+  port              = local.public_tcp[0] # pool 0's RTMPS (11936): the automatic entry's port (§14.4)
+  request_interval  = 10
+  failure_threshold = 3
+  regions           = var.health_check_regions
+  tags              = { Name = "${local.name}-ingest-tcp" }
+}
+
+resource "aws_route53_health_check" "auto_accepting" {
+  count                           = local.auto_on ? 1 : 0
+  type                            = "CLOUDWATCH_METRIC"
+  cloudwatch_alarm_name           = aws_cloudwatch_metric_alarm.ingest_accepting[0].alarm_name
+  cloudwatch_alarm_region         = var.region
+  insufficient_data_health_status = "Unhealthy"
+  tags                            = { Name = "${local.name}-ingest-accepting" }
+}
+
+resource "aws_route53_health_check" "auto" {
+  count                  = local.auto_on ? 1 : 0
+  type                   = "CALCULATED"
+  child_health_threshold = 2 # BOTH: the TCP check AND the accepting alarm
+  child_healthchecks     = [aws_route53_health_check.auto_tcp[0].id, aws_route53_health_check.auto_accepting[0].id]
+  tags                   = { Name = "${local.name}-ingest" }
+}
+
+# --- this region's member of the latency set (IMPORTED after the manual change batch — README) ------------------
+
+resource "aws_route53_record" "auto" {
+  count           = local.auto_on && var.auto_latency_record ? 1 : 0
+  zone_id         = var.zone_id
+  name            = var.auto_host
+  type            = "A"
+  ttl             = 60
+  records         = [aws_eip.this.public_ip]
+  set_identifier  = var.key
+  health_check_id = aws_route53_health_check.auto[0].id
+  latency_routing_policy {
+    region = var.region
+  }
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# --- certificate renewal / issue failures (certbot's log ships to the bootstrap group: cloudwatch-agent.json.tmpl) --
+
+resource "aws_cloudwatch_log_metric_filter" "cert_failure" {
+  count          = var.cert_renewal_alarm ? 1 : 0
+  name           = "${local.name}-cert-failure"
+  log_group_name = "${var.log_prefix}/bootstrap"
+  # certbot: "Failed to renew certificate <name> with error: …" per lineage, "All renewals failed." when none did;
+  # media-bootstrap.sh phase certs: "certbot could not issue <host> …" / "certbot could not re-issue <host> …".
+  pattern = "?\"Failed to renew certificate\" ?\"All renewals failed\" ?\"certbot could not issue\" ?\"certbot could not re-issue\""
+  metric_transformation {
+    namespace = "GKOI/Media"
+    name      = "CertFailures-${var.key}"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "cert_failure" {
+  count               = var.cert_renewal_alarm ? 1 : 0
+  alarm_name          = "${local.name}-cert-failure"
+  alarm_description   = "Media ${var.key}: a Let's Encrypt renewal or issue failed (certbot's log in ${var.log_prefix}/bootstrap). Certificates renew 30 days ahead: a failure is days of warning, not an outage."
+  namespace           = "GKOI/Media"
+  metric_name         = "CertFailures-${var.key}"
+  statistic           = "Sum"
+  period              = 3600
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.alarm_topic_arn == null ? [] : [var.alarm_topic_arn]
+  ok_actions          = var.alarm_topic_arn == null ? [] : [var.alarm_topic_arn]
+  depends_on          = [aws_cloudwatch_log_metric_filter.cert_failure]
 }

@@ -117,19 +117,39 @@ locals {
     S3_REGION            = var.recordings_bucket_region
     S3_BUCKET            = local.recordings_bucket
     # S3_ACCESS_KEY / S3_SECRET_KEY deliberately absent: the AWS SDK's default chain = the instance role (D3).
-  }, length(local.extra_vod_buckets) > 0 ? { VOD_BUCKETS = jsonencode([for b in local.extra_vod_buckets : { bucket = b }]) } : {}, var.agent_env)
+  }, length(local.extra_vod_buckets) > 0 ? { VOD_BUCKETS = jsonencode([for b in local.extra_vod_buckets : { bucket = b }]) } : {}, local.ingest_agent_env, var.agent_env)
+
+  # ---- SPEC-ONE-INGEST-ADDRESS-V1 (1.1.8; variables.tf "ingest_*") — every map below is EMPTY at the defaults ---------
+  ingest_auto_on = var.ingest_auto_host != ""
+  ingest_agent_env = merge(
+    local.ingest_auto_on ? {
+      INGEST_AUTO_HOST        = var.ingest_auto_host # the accepting check reads pool 0's served certificate for it
+      INGEST_ACCEPTING_METRIC = "1"                  # one log line a minute → the module's metric filters
+    } : {},
+    var.ingest_geoip_country_file != "" ? { GEOIP_COUNTRY_FILE = var.ingest_geoip_country_file } : {},
+  )
+  # The live stream name each region's box takes when it serves its live names: its regional name if one is given
+  # (Oregon: stream-usw2), else live_stream_host (today).
+  stream_host_live = { for k, v in local.enabled : k => lookup(var.ingest_regional_stream_hosts, k, v.live_stream_host) }
+  # A renamed region keeps the OLD name's plain A record (still managed, prevent_destroy) until the latency set replaces
+  # it: dropping it from the map earlier would stop the plan.
+  old_live_record = {
+    for k, v in local.enabled : k => (local.stream_host_live[k] != v.live_stream_host && !var.ingest_auto_latency_records ? [v.live_stream_host] : [])
+  }
+  # Regions whose live stream name IS the automatic name (a latency set cannot share the name with a plain record).
+  auto_name_clash = [for k, v in local.enabled : k if local.ingest_auto_on && local.stream_host_live[k] == var.ingest_auto_host]
 
   # ---- per-region config (the SSM parameter's body; the module adds the EIP + ASG facts) ------------------------
   config = {
-    for k, v in local.enabled : k => {
+    for k, v in local.enabled : k => merge({
       v                   = 1
       key                 = k
       region              = module.regions.all[k].region
       home_region         = var.engine_home_region
       label               = v.label
-      stream_host         = v.serve_live_names ? v.live_stream_host : v.rehearsal_stream_host
+      stream_host         = v.serve_live_names ? local.stream_host_live[k] : v.rehearsal_stream_host
       origin_host         = v.serve_live_names ? v.live_origin_host : v.rehearsal_origin_host
-      cert_hosts          = distinct([v.rehearsal_stream_host, v.rehearsal_origin_host, v.live_stream_host, v.live_origin_host])
+      cert_hosts          = distinct([v.rehearsal_stream_host, v.rehearsal_origin_host, local.stream_host_live[k], v.live_origin_host])
       pool_count          = v.pool_count
       portal_internal_url = local.portal_internal_url
       live_origin_base    = var.live_origin_base
@@ -161,7 +181,13 @@ locals {
       cw                          = { namespace = "GKOI/Media", log_prefix = "/gkoi/prod2/media/${k}" }
       drain_max_minutes           = var.drain_max_minutes
       udp_buffer_bytes            = var.udp_buffer_bytes
-    }
+      },
+      # 1.1.8 keys — ABSENT at the defaults (the box then behaves exactly as before; media-bootstrap.sh reads them with //):
+      # cert_sans: lineage (the served stream host) → the extra names its certificate must carry (the automatic name);
+      # srt: the pools publish :8890/udp at (i+1)8890 and register publicSrtPort.
+      local.ingest_auto_on ? { cert_sans = { (v.serve_live_names ? local.stream_host_live[k] : v.rehearsal_stream_host) = [var.ingest_auto_host] } } : {},
+      var.ingest_srt ? { srt = true } : {},
+    )
   }
 
   user_data = {
@@ -172,7 +198,10 @@ locals {
   }
 
   rehearsal_records = { for k, v in local.enabled : k => [v.rehearsal_stream_host, v.rehearsal_origin_host] }
-  live_records      = { for k, v in local.enabled : k => v.manage_live_records ? [v.live_stream_host, v.live_origin_host] : [] }
+  live_records      = { for k, v in local.enabled : k => v.manage_live_records ? distinct(concat([local.stream_host_live[k], v.live_origin_host], local.old_live_record[k])) : [] }
+  # The DNS-01 scope (IAM) = every certificate name: the cert hosts, the old live stream name of a renamed region (its
+  # lineage still renews on the box) and the automatic name (a SAN of the stream lineage). At the defaults = cert_hosts.
+  acme_names = { for k, v in local.enabled : k => distinct(concat(local.config[k].cert_hosts, [v.live_stream_host], local.ingest_auto_on ? [var.ingest_auto_host] : [])) }
 
   secret_arns = {
     for k, v in local.enabled : k => concat(
@@ -216,6 +245,14 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = !var.rehearsal || length(setintersection(keys(var.agent_env), ["S3_BUCKET", "VOD_BUCKETS", "S3_REGION"])) == 0
       error_message = "rehearsal = true sets the agents' bucket itself; remove S3_BUCKET / VOD_BUCKETS / S3_REGION from var.agent_env."
+    }
+    precondition {
+      condition     = !var.ingest_auto_latency_records || local.ingest_auto_on
+      error_message = "ingest_auto_latency_records = true needs ingest_auto_host (the name of the latency set and its health checks)."
+    }
+    precondition {
+      condition     = !var.ingest_auto_latency_records || length(local.auto_name_clash) == 0
+      error_message = "ingest_auto_latency_records = true while ${join(", ", local.auto_name_clash)} still serves ${var.ingest_auto_host} as its live stream name: give it its regional name first (ingest_regional_stream_hosts)."
     }
     precondition {
       condition     = length(local.enabled) == length({ for k, v in var.media_regions : k => v if v.enabled })
@@ -302,7 +339,7 @@ module "box_usw2" {
   rehearsal_records           = local.rehearsal_records.usw2
   live_records                = local.live_records.usw2
   zone_id                     = var.zone_id
-  acme_names                  = local.config.usw2.cert_hosts
+  acme_names                  = local.acme_names.usw2
   secret_arns                 = local.secret_arns.usw2
   recordings_buckets          = local.recordings_buckets
   bundle_object_arns          = local.bundle_object_arns
@@ -311,6 +348,11 @@ module "box_usw2" {
   lifecycle_heartbeat_seconds = var.lifecycle_heartbeat_seconds
   config                      = local.config.usw2
   user_data                   = local.user_data.usw2
+  srt_enabled                 = var.ingest_srt
+  auto_host                   = var.ingest_auto_host
+  auto_latency_record         = var.ingest_auto_latency_records
+  log_prefix                  = local.config.usw2.cw.log_prefix
+  cert_renewal_alarm          = var.cert_renewal_alarms
 }
 
 module "box_euc1" {
@@ -337,7 +379,7 @@ module "box_euc1" {
   rehearsal_records           = local.rehearsal_records.euc1
   live_records                = local.live_records.euc1
   zone_id                     = var.zone_id
-  acme_names                  = local.config.euc1.cert_hosts
+  acme_names                  = local.acme_names.euc1
   secret_arns                 = local.secret_arns.euc1
   recordings_buckets          = local.recordings_buckets
   bundle_object_arns          = local.bundle_object_arns
@@ -346,6 +388,11 @@ module "box_euc1" {
   lifecycle_heartbeat_seconds = var.lifecycle_heartbeat_seconds
   config                      = local.config.euc1
   user_data                   = local.user_data.euc1
+  srt_enabled                 = var.ingest_srt
+  auto_host                   = var.ingest_auto_host
+  auto_latency_record         = var.ingest_auto_latency_records
+  log_prefix                  = local.config.euc1.cw.log_prefix
+  cert_renewal_alarm          = var.cert_renewal_alarms
 }
 
 module "box_use1" {
@@ -372,7 +419,7 @@ module "box_use1" {
   rehearsal_records           = local.rehearsal_records.use1
   live_records                = local.live_records.use1
   zone_id                     = var.zone_id
-  acme_names                  = local.config.use1.cert_hosts
+  acme_names                  = local.acme_names.use1
   secret_arns                 = local.secret_arns.use1
   recordings_buckets          = local.recordings_buckets
   bundle_object_arns          = local.bundle_object_arns
@@ -381,6 +428,11 @@ module "box_use1" {
   lifecycle_heartbeat_seconds = var.lifecycle_heartbeat_seconds
   config                      = local.config.use1
   user_data                   = local.user_data.use1
+  srt_enabled                 = var.ingest_srt
+  auto_host                   = var.ingest_auto_host
+  auto_latency_record         = var.ingest_auto_latency_records
+  log_prefix                  = local.config.use1.cw.log_prefix
+  cert_renewal_alarm          = var.cert_renewal_alarms
 }
 
 module "box_apne1" {
@@ -407,7 +459,7 @@ module "box_apne1" {
   rehearsal_records           = local.rehearsal_records.apne1
   live_records                = local.live_records.apne1
   zone_id                     = var.zone_id
-  acme_names                  = local.config.apne1.cert_hosts
+  acme_names                  = local.acme_names.apne1
   secret_arns                 = local.secret_arns.apne1
   recordings_buckets          = local.recordings_buckets
   bundle_object_arns          = local.bundle_object_arns
@@ -416,6 +468,11 @@ module "box_apne1" {
   lifecycle_heartbeat_seconds = var.lifecycle_heartbeat_seconds
   config                      = local.config.apne1
   user_data                   = local.user_data.apne1
+  srt_enabled                 = var.ingest_srt
+  auto_host                   = var.ingest_auto_host
+  auto_latency_record         = var.ingest_auto_latency_records
+  log_prefix                  = local.config.apne1.cw.log_prefix
+  cert_renewal_alarm          = var.cert_renewal_alarms
 }
 
 # --- Valkey (data stack) from the home box: a same-VPC SG reference. The spoke boxes come in through the data

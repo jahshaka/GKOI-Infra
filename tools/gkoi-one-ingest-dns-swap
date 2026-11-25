@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# gkoi-one-ingest-dns-swap: PRINT (never run) the DNS swap of the automatic ingest name — SPEC-ONE-INGEST-ADDRESS-V1
+# §14.8, envs/prod2/media/README.md "The one ingest address + SRT (1.1.8)", step 6.
+#
+#   gkoi-one-ingest-dns-swap <ingest.json>      the media stack's output:  terraform output -json ingest > ingest.json
+#   gkoi-one-ingest-dns-swap -                  the same JSON on stdin
+#
+# It prints, in order: the checks before, the ONE Route 53 change batch (DELETE the plain A record of the automatic
+# name + CREATE its four latency records, each with its region's CALCULATED health check), the command that submits
+# it, the `terraform state rm` of the old record and the four `terraform import` lines, the plan to expect, and the
+# rollback batch (the same batch reversed). It makes NO AWS call, writes no file and changes no state: it is a dry-run
+# document generated from the stack's own output, so the ids and addresses in it are the applied ones.
+#
+# Why a hand batch: Route 53 refuses a plain A record and latency records under one name, so the swap must be ONE
+# atomic change (no moment without an answer); the old record is under prevent_destroy in Terraform (on purpose).
+# Where to run what it prints: the change batch and the state operations need WRITE credentials (the operator / the
+# AWS MCP sign-in — the gkoi-orchestrator role is read-only); `terraform` 1.9.8 in envs/prod2/media after `init`.
+set -euo pipefail
+GKOI_TOOL=gkoi-one-ingest-dns-swap
+say() { printf '%s: %s\n' "$GKOI_TOOL" "$*" >&2; }
+die() { printf '%s: ERROR: %s\n' "$GKOI_TOOL" "$*" >&2; exit 1; }
+
+[ $# -eq 1 ] || { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+command -v jq >/dev/null || die "needs jq"
+if [ "$1" = - ]; then J="$(cat)"; else [ -r "$1" ] || die "cannot read $1"; J="$(cat "$1")"; fi
+# `terraform output -json ingest` prints the object itself; `terraform output -json` prints {ingest: {value: …}}.
+J="$(jq -c 'if has("ingest") then .ingest.value elif has("value") then .value else . end' <<< "$J")" || die "not JSON"
+
+AUTO="$(jq -r '.auto_host // ""' <<< "$J")"
+ZONE="$(jq -r '.zone_id // ""' <<< "$J")"
+[ -n "$AUTO" ] || die "ingest.auto_host is empty: apply media with ingest_auto_host first (the health checks come with it)"
+[[ "$ZONE" =~ ^Z[A-Z0-9]+$ ]] || die "ingest.zone_id '$ZONE' is not a hosted zone id"
+[ "$(jq -r '.latency_records' <<< "$J")" = false ] || die "ingest.latency_records is already true — this output is from AFTER the swap"
+missing="$(jq -r '.regions | to_entries[] | select(.value.health_check_id == null or .value.eip == null) | .key' <<< "$J")"
+[ -z "$missing" ] || die "no health check / EIP for: $missing — apply media with ingest_auto_host first"
+clash="$(jq -r --arg a "$AUTO" '.regions | to_entries[] | select(.value.stream_host == $a) | .key' <<< "$J")"
+[ -z "$clash" ] || die "$clash still serves $AUTO as its stream host — rename it (ingest_regional_stream_hosts) and roll it first"
+[ "$(jq '.regions | length' <<< "$J")" -ge 1 ] || die "no regions"
+OLD_IP="$(jq -r '.regions.usw2.eip // empty' <<< "$J")"
+[ -n "$OLD_IP" ] || die "no usw2 region: the plain $AUTO record points at Oregon's EIP — fill DELETE's value by hand"
+
+latency_changes() { # ACTION → the four latency record changes
+  jq -c --arg act "$1" --arg auto "$AUTO" '[.regions | to_entries[] | {Action: $act, ResourceRecordSet: {
+      Name: $auto, Type: "A", SetIdentifier: .key, Region: .value.region, TTL: 60,
+      ResourceRecords: [{Value: .value.eip}], HealthCheckId: .value.health_check_id }}]' <<< "$J"
+}
+plain_change() { # ACTION → the plain A record (Oregon, TTL 60 — exactly as it is today, or Route 53 refuses the DELETE)
+  jq -cn --arg act "$1" --arg auto "$AUTO" --arg ip "$OLD_IP" \
+    '[{Action: $act, ResourceRecordSet: {Name: $auto, Type: "A", TTL: 60, ResourceRecords: [{Value: $ip}]}}]'
+}
+SWAP="$(jq -n --argjson d "$(plain_change DELETE)" --argjson c "$(latency_changes CREATE)" --arg a "$AUTO" \
+  '{Comment: "1.1.8: \($a) becomes the automatic ingest name (latency set)", Changes: ($d + $c)}')"
+BACK="$(jq -n --argjson d "$(latency_changes DELETE)" --argjson c "$(plain_change CREATE)" --arg a "$AUTO" \
+  '{Comment: "ROLLBACK: \($a) back to one plain A record on Oregon", Changes: ($d + $c)}')"
+
+cat <<EOF
+# =====================================================================================================================
+# The DNS swap of $AUTO — generated $(date -u +%FT%TZ) from the media stack's output. NOTHING HAS BEEN RUN.
+# Zone $ZONE. Members: $(jq -r '.regions | to_entries | map("\(.key) \(.value.region) \(.value.eip) hc \(.value.health_check_id)") | join("; ")' <<< "$J")
+# =====================================================================================================================
+
+## 0. Before (every line must hold; else stop)
+#  - every box rolled with the automatic name on its certificate: on each box  sudo /opt/gkoi-media/media-bootstrap.sh check
+#    → "cert: <stream host> names <stream host> $AUTO" and exit 0
+#  - the four health checks HEALTHY (the agents log IngestAccepting = 1 every minute):
+$(jq -r '.regions | to_entries[] | "aws route53 get-health-check-status --health-check-id \(.value.health_check_id) --query \"HealthCheckObservations[].StatusReport.Status\" --output text   # \(.key)"' <<< "$J")
+#  - today's record is exactly the one the batch deletes:
+aws route53 list-resource-record-sets --hosted-zone-id $ZONE --query "ResourceRecordSets[?Name=='$AUTO.']" --output json
+#    → ONE record: A, TTL 60, $OLD_IP, no SetIdentifier
+
+## 1. The ONE change batch (save as swap.json)
+$(jq . <<< "$SWAP")
+
+## 2. Submit it, wait until INSYNC (≈ 60 s)
+aws route53 change-resource-record-sets --hosted-zone-id $ZONE --change-batch file://swap.json --query ChangeInfo.Id --output text
+aws route53 wait resource-record-sets-changed --id <the id printed above>
+
+## 3. Terraform's state (envs/prod2/media, terraform 1.9.8, after \`terraform init\`; write credentials)
+#    From the commit that sets ingest_auto_latency_records = true (variables.tf default), so the imported resources exist
+#    in the configuration:
+terraform state rm 'module.box_usw2[0].aws_route53_record.live["$AUTO"]'
+$(jq -r --arg z "$ZONE" --arg a "$AUTO" '.regions | keys[] as $k | "terraform import '"'"'module.box_\($k)[0].aws_route53_record.auto[0]'"'"' \($z)_\($a)_A_\($k)"' <<< "$J")
+
+## 4. Plan (tools/gkoi-infra-run media plan) — expect NO create / destroy of any aws_route53_record; the four imported
+##    records with no change (an in-place update of one = a value differs from the batch: read it before applying).
+
+## 5. Check (from three public resolvers; each answers ONE address — the nearest healthy region's)
+for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @\$r $AUTO A; done
+aws route53 test-dns-answer --hosted-zone-id $ZONE --record-name $AUTO --record-type A --resolver-ip 198.51.100.1 --edns0-client-subnet-ip 85.214.0.1 --query RecordData   # a German subnet → euc1
+
+## ROLLBACK (1.1.8 is fix-forward; kept for later releases): submit the batch below, then \`terraform state rm\` the four
+## .auto[0], commit ingest_auto_latency_records = false (the config then manages the plain record again — Oregon keeps
+## stream-usw2) and import it: terraform import 'module.box_usw2[0].aws_route53_record.live["$AUTO"]' ${ZONE}_${AUTO}_A
+## Unset the api's INGEST_AUTO_HOST (compute ingest_auto_host = "") first. $AUTO stays on every certificate either way.
+$(jq . <<< "$BACK")
+EOF

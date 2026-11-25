@@ -23,6 +23,28 @@ output "boxes" {
   }
 }
 
+output "ingest" {
+  description = <<-EOT
+    SPEC-ONE-INGEST-ADDRESS-V1 (1.1.8): the automatic name and, per region, what its latency record needs — the EIP, the
+    AWS region (latency region) and the CALCULATED health check id (null while ingest_auto_host is off).
+    tools/one-ingest-dns-swap.sh reads it to print the one Route 53 change batch.
+  EOT
+  value = {
+    auto_host       = var.ingest_auto_host
+    latency_records = var.ingest_auto_latency_records
+    srt             = var.ingest_srt
+    zone_id         = var.zone_id
+    regions = {
+      for k, b in local.boxes : k => {
+        region          = local.config[k].region
+        eip             = b.eip_public_ip
+        stream_host     = local.config[k].stream_host
+        health_check_id = b.auto_health_check_id
+      }
+    }
+  }
+}
+
 output "portal_internal_url" {
   description = "PORTAL_INTERNAL_URL the boxes use (the engine api's /internal/** through the internal ALB)."
   value       = local.portal_internal_url

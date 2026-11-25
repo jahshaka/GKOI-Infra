@@ -299,3 +299,79 @@ variable "origin_max_conns_per_viewer" {
   type    = number
   default = 100
 }
+
+# =================================================================================================================
+# SPEC-ONE-INGEST-ADDRESS-V1 (the 1.1.8 stopped release) — README "The one ingest address + SRT (1.1.8)".
+# Every default below = TODAY: with all of them at their defaults the config parameters, the SGs, the IAM policies and
+# the records are exactly as before (the plan shows only the box bundle's new script bytes). Turned on IN THE STOP,
+# in the README's order, one commit + apply each.
+# =================================================================================================================
+
+variable "ingest_regional_stream_hosts" {
+  description = <<-EOT
+    Region key → its REGIONAL stream name, replacing live_stream_host as the box's stream host (publicHost, the WebRTC
+    advertised host, the RTMPS certificate lineage) and adding that name's A record (a live record: allow_overwrite,
+    prevent_destroy). 1.1.8: { usw2 = "stream-usw2.gkoi.com" } — Oregon gives stream.gkoi.com up to the automatic name.
+    The old live_stream_host keeps its plain A record (still managed) until ingest_auto_latency_records.
+  EOT
+  type        = map(string)
+  default     = {}
+  validation {
+    condition     = alltrue([for k, h in var.ingest_regional_stream_hosts : contains(["usw2", "euc1", "use1", "apne1"], k) && can(regex("^[a-z0-9-]+\\.gkoi\\.com$", h))])
+    error_message = "ingest_regional_stream_hosts: a media region key → a single label under gkoi.com."
+  }
+}
+
+variable "ingest_auto_host" {
+  description = <<-EOT
+    The automatic ingest name (stream.gkoi.com); "" = off. Set: every box's stream certificate covers it (one lineage
+    named for the box's stream host, -d <regional> -d <this>, the bootstrap re-issues on a different NAME SET), its
+    DNS-01 IAM scope includes it, the agents get INGEST_AUTO_HOST + INGEST_ACCEPTING_METRIC=1, and per region: the
+    IngestAccepting metric filters + alarm + the three Route 53 health checks. The api's own INGEST_AUTO_HOST is the
+    compute stack's ingest_auto_host — set it AFTER the media agents run this (the engine env example's deploy order).
+  EOT
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.ingest_auto_host == "" || can(regex("^[a-z0-9-]+\\.gkoi\\.com$", var.ingest_auto_host))
+    error_message = "ingest_auto_host: \"\" or a single label under gkoi.com."
+  }
+}
+
+variable "ingest_auto_latency_records" {
+  description = <<-EOT
+    true = ingest_auto_host is FOUR latency A records (one per region, set identifier = the key) with the calculated
+    health checks, and the plain A record of that name is no longer managed. Turned on ONLY after the manual Route 53
+    change batch + `terraform state rm` + `terraform import` (tools/one-ingest-dns-swap.sh prints them); a plan with
+    this on and the old record still in state stops on prevent_destroy — on purpose.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "ingest_srt" {
+  description = <<-EOT
+    true = SRT on the public internet: udp (i+1)8890 (18890 pool 0, 28890 pool 1) in every box's SG, the compose file
+    publishes the pools' :8890/udp there, and each pool registers publicSrtPort. The pools' SRT listener itself is
+    already on (pool.yml `srt: yes`, MK_POOL_SRT_LISTEN unset = on, patched +gkoi MediaMTX). When a pool's ports
+    change, its old registry entry must be cleared or the engine's explicit ports set (README).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "ingest_geoip_country_file" {
+  description = <<-EOT
+    GEOIP_COUNTRY_FILE for every media agent: the path of the DB-IP "IP to Country Lite" CSV INSIDE the media-agent
+    image ("" = unset = every sender's country unknown, as today). The file is baked into the image by the engine repo
+    (infra/docker/media-agent.Dockerfile) — this stack only names its path. 1.1.8: /app/geoip/dbip-country-lite.csv.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "cert_renewal_alarms" {
+  description = "true = per box a metric filter on its bootstrap log group (certbot's log) + an alarm on any certificate renewal / issue failure."
+  type        = bool
+  default     = false
+}

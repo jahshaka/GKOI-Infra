@@ -134,3 +134,49 @@ variable "user_data" {
   description = "The rendered user-data (no secrets: only where the config parameter is)."
   type        = string
 }
+
+# --- SPEC-ONE-INGEST-ADDRESS-V1 (1.1.8): every default = today's behaviour (no resource, no rule, no change) ---------
+
+variable "srt_enabled" {
+  description = "true = the public SRT ingest ports udp (i+1)8890 (18890 / 28890) open to the world, like the RTMPS ports."
+  type        = bool
+  default     = false
+}
+
+variable "auto_host" {
+  description = <<-EOT
+    The automatic ingest name (stream.gkoi.com); "" = off. Set: the region's IngestAccepting metric (two metric filters
+    on the container log group), its alarm, and the three Route 53 health checks (TCP on pool 0's RTMPS port + the
+    alarm, CALCULATED = both). The latency record itself only with auto_latency_record.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "auto_latency_record" {
+  description = <<-EOT
+    true = this region's member of the auto_host latency set (A, set identifier = key, latency region = region, TTL 60,
+    the calculated health check). Created by the ONE manual Route 53 change batch and IMPORTED here (README "The one
+    ingest address + SRT (1.1.8)"); prevent_destroy like the live names.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "log_prefix" {
+  description = "The box's CloudWatch log group prefix (/gkoi/prod2/media/<key>; the observability stack owns the groups)."
+  type        = string
+  default     = ""
+}
+
+variable "cert_renewal_alarm" {
+  description = "true = a metric filter on the box's bootstrap log group (certbot's log ships there) + an alarm on any renewal / issue failure."
+  type        = bool
+  default     = false
+}
+
+variable "health_check_regions" {
+  description = "The Route 53 checker regions for the TCP check (minimum 3: fewer probes = fewer TLS-less connects in the pool's log)."
+  type        = list(string)
+  default     = ["us-west-1", "us-east-1", "eu-west-1"]
+}

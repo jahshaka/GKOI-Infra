@@ -174,7 +174,13 @@ locals {
     },
     local.default_engine_env,
     local.rehearsal_engine_env,
+    local.ingest_engine_env,
     var.engine_env,
+  )
+  # SPEC-ONE-INGEST-ADDRESS-V1 (1.1.8): empty at the defaults (the task definitions do not change).
+  ingest_engine_env = var.ingest_auto_host == "" ? {} : merge(
+    { INGEST_AUTO_HOST = var.ingest_auto_host, INGEST_AUTO_RTMPS_PORT = tostring(var.ingest_auto_rtmps_port) },
+    var.ingest_auto_srt_port == null ? {} : { INGEST_AUTO_SRT_PORT = tostring(var.ingest_auto_srt_port) },
   )
 
   engine_edge_env = merge(
