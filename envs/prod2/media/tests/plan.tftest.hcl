@@ -188,11 +188,13 @@ run "all_three" {
     error_message = "records"
   }
   assert {
-    condition     = startswith(local.config.usw2.images["media-agent"], "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/media-agent@sha256:0ca2d707") && startswith(local.config.euc1.images.mediamtx, "127214190346.dkr.ecr.eu-central-1.amazonaws.com/gkoi/mediamtx@sha256:")
+    # The digests and the tag come from releases/mikaido.json (local.release), not pinned here: a release bump must not
+    # turn this run red (it pinned gkoi-2026.11.11-1 and went stale with gkoi-2026.11.18-2).
+    condition     = local.config.usw2.images["media-agent"] == "127214190346.dkr.ecr.us-west-2.amazonaws.com/gkoi/media-agent@${local.release.images["media-agent"].digest}" && local.config.euc1.images.mediamtx == "127214190346.dkr.ecr.eu-central-1.amazonaws.com/gkoi/mediamtx@${local.release.images.mediamtx.digest}" && startswith(local.release.images["media-agent"].digest, "sha256:")
     error_message = "images"
   }
   assert {
-    condition     = local.config.usw2.engine_source.s3_uri == "s3://gkoi-build-sources-127214190346/mikaido/gkoi-2026.11.11-1/source.zip"
+    condition     = local.config.usw2.engine_source.s3_uri == "s3://gkoi-build-sources-127214190346/mikaido/${local.release.tag}/source.zip" && can(regex("^gkoi-[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}-[0-9]+$", local.release.tag))
     error_message = "source"
   }
   assert {

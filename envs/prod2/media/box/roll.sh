@@ -17,7 +17,15 @@
 #      region takes none meanwhile); an idle box rolls at once, a busy one (sessions / recordings / builds) waits up to
 #      --drain-wait N minutes for idle; still busy after N minutes → the drain is cleared and the roll refused (exit 3), unless --force (cuts
 #      every live stream on the box);
-#   4. media-bootstrap.sh apply --only certs,env,compose,lifecycle (a new stream/origin name gets its cert first);
+#   3b. (1.1.8) ONLY when the config names the automatic ingest host (agent_env.INGEST_AUTO_HOST): the box stays drained
+#      at least --dns-drain-wait SECONDS (default 300, 0 = off) counted FROM THE DRAIN before anything restarts, so its
+#      IngestAccepting alarm (2 of 3 minutes) has failed the Route 53 health check and the TTL (60 s) has run out —
+#      new automatic senders already go elsewhere (SPEC-ONE-INGEST-ADDRESS-V1 §14.6). Not a second wait: the time spent
+#      in step 3's --drain-wait (waiting for idle) counts toward it; only the remainder is slept. No agent running = no
+#      drain = no wait (the metric is already missing, i.e. breaching);
+#   4. media-bootstrap.sh apply --only certs,env,compose,lifecycle (a new stream/origin name gets its cert first) — its
+#      output is also appended to /var/log/gkoi-media-bootstrap.log (→ CloudWatch …/bootstrap, where the cert-failure
+#      metric filter reads a failed re-issue);
 #   5. the drain cleared, `check` printed.
 # --dry-run: steps 1–2 only, then print what would change.
 set -euo pipefail
@@ -28,16 +36,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=media-lib.sh
 . "$HERE/media-lib.sh"
 
-wait_min=0 force=0 dry=0
+wait_min=0 force=0 dry=0 dns_wait=300
 while [ $# -gt 0 ]; do
   case "$1" in
     --drain-wait) wait_min="${2:-}"; shift 2 ;;
+    --dns-drain-wait) dns_wait="${2:-}"; shift 2 ;;
     --force) force=1; shift ;;
     --dry-run) dry=1; shift ;;
-    *) echo "usage: roll.sh [--drain-wait MINUTES] [--force] [--dry-run]" >&2; exit 2 ;;
+    *) echo "usage: roll.sh [--drain-wait MINUTES] [--dns-drain-wait SECONDS] [--force] [--dry-run]" >&2; exit 2 ;;
   esac
 done
 [[ "$wait_min" =~ ^[0-9]+$ ]] || die "--drain-wait needs whole minutes"
+[[ "$dns_wait" =~ ^[0-9]+$ ]] || die "--dns-drain-wait needs whole seconds"
 [ "$(id -u)" -eq 0 ] || die "run as root (SSM runs as root)"
 
 say "== roll $(date -u +%FT%TZ): $(cfg .engine_source.tag) → refreshing the config"
@@ -63,9 +73,11 @@ drained_by_us=0
 undrain() { [ $drained_by_us -eq 1 ] && { agent_call DELETE /drain >/dev/null || warn "the drain could not be cleared — DELETE /drain on the agent (or the engine admin)"; }; drained_by_us=0; }
 # A failed roll (a die anywhere below) must not leave the region drained.
 trap 'rm -f "$new"; undrain' EXIT
+drained_at=0
 if [ -n "$(container_of media-agent)" ]; then
   agent_call POST /drain >/dev/null || die "the agent refused the drain"
   drained_by_us=1
+  drained_at=$(date +%s)
 fi
 if ! box_idle; then
   if [ "$force" -eq 1 ]; then
@@ -88,7 +100,19 @@ if ! box_idle; then
   fi
 fi
 
-GKOI_MEDIA_FORCE=1 "$TOOL/media-bootstrap.sh" apply --only certs,env,compose,lifecycle
+# 3b. The automatic name (1.1.8): stay drained until Route 53 has dropped this box (counted from the drain).
+auto_host="$(cfg_or '.agent_env.INGEST_AUTO_HOST' '')"
+if [ -n "$auto_host" ] && [ $drained_by_us -eq 1 ] && [ "$dns_wait" -gt 0 ]; then
+  left=$(( drained_at + dns_wait - $(date +%s) ))
+  if [ $left -gt 0 ]; then
+    say "automatic name $auto_host: drained — waiting ${left} s more so Route 53 drops this box before anything restarts (--dns-drain-wait $dns_wait)"
+    sleep "$left"
+  fi
+fi
+
+# 4. Appended to the bootstrap log too: CloudWatch …/bootstrap (the cert-failure metric filter) sees a failed re-issue.
+say "== roll: certs, env, compose, lifecycle $(date -u +%FT%TZ)" | tee -a /var/log/gkoi-media-bootstrap.log
+GKOI_MEDIA_FORCE=1 "$TOOL/media-bootstrap.sh" apply --only certs,env,compose,lifecycle 2>&1 | tee -a /var/log/gkoi-media-bootstrap.log
 undrain
 jq '{stream_host, origin_host, portal_internal_url, pool_count, engine: .engine_source.tag}' "$CFG" > "$STATE/last-roll.json"
 "$TOOL/media-bootstrap.sh" check || die "rolled, but the check is not clean (above)"

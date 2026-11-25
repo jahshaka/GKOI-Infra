@@ -510,24 +510,58 @@ boot because the spec puts it in the image (§14.12 f), it needs no IAM / bootst
 rebuilt every release anyway (the monthly refresh rides a release). A missing file is harmless: one error line, every
 country unknown.
 
+### Before the day (read-only — the gkoi-orchestrator role may run these)
+
+- The metric filter's regex constructs on REAL Docker-wrapped container lines (`logs:TestMetricFilter` is denied to the
+  role; `FilterLogEvents` takes the same pattern syntax). Checked 2026-11-25 on usw2, 2 h window: 
+  `gkoi-aws logs filter-log-events --log-group-name /gkoi/prod2/media/usw2/container --filter-pattern '{ $.log = %RTMPS\W{3}conn\D% }' --start-time <ms> --query 'length(events)'`
+  → **1440** (the pool's `[RTMPS] [conn …` lines: the `$.log` JSON term, `\W{n}` and `\D` are accepted and match);
+  the control `%RTMPS\W{4}conn\D%` → **0**; the two `IngestAccepting` patterns are accepted (0 matches — no agent emits
+  the line yet). The exact patterns against the agent's line (decoded `$.log`) were checked with `grep -P`: value-1
+  pattern matches only the value-1 line, value-0 only the value-0 line. Re-run the first two lines the day before.
+- `aws route53 list-resource-record-sets --hosted-zone-id Z07245612XI342WI698UZ --query "ResourceRecordSets[?Name=='stream.gkoi.com.']"`
+  → ONE plain A, TTL 60, `32.188.243.42` (what the swap's DELETE must match); `list-health-checks` → only www's.
+- Nobody digs `stream-usw2.gkoi.com` before step 1 (an NXDOMAIN is cached for 900 s).
+
 ### Order inside the stop (everything is down; runbook §5)
+
+**The 1.1.8 IMAGES are rolled FIRST** (runbook §4.2: `releases/mikaido.json` → media apply → `roll.sh` on every box,
+pools + agents healthy). This infra apply and its roll come AFTER, as their own commit, apply and roll — never in the
+same apply as the image bump (a failed certificate must not hold the new images back). During the stop nothing is in
+the latency set yet, so the rolls may pass `--dns-drain-wait 0` (roll.sh otherwise stays drained 300 s on a box whose
+config names the automatic host — the planned-drain rule for later releases).
 
 | # | Step | Check (each must pass before the next) |
 |---|---|---|
-| 1 | Commit the five media values above (NOT `ingest_auto_latency_records`); `tools/gkoi-infra-run media plan` — expect **41 to add, 11 to change, 0 to destroy** (review plan 2026-11-25): per region 10 = 2 SRT SG rules, 3 metric filters (accepting 0 / 1, cert failure), 2 alarms, 3 health checks; + `module.box_usw2[0].aws_route53_record.live["stream-usw2.gkoi.com"]`; in place: the 4 config parameters, the 4 box policies (DNS-01 scope), 2 bundle objects, `terraform_data.preflight`. Anything destroyed = stop. Then `apply`. This also creates `stream-usw2.gkoi.com` (A → Oregon's EIP). Can be the SAME apply as the release's image bump (§4.2). | `for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @$r stream-usw2.gkoi.com; done` → `32.188.243.42` three times (do NOT dig it before it exists: the zone caches NXDOMAIN for 900 s). `aws ec2 describe-security-group-rules --region <r> --filters Name=group-id,Values=<box sg> --query "SecurityGroupRules[?IpProtocol=='udp'].[FromPort,CidrIpv4]"` → 8189, 8289, **18890, 28890** |
-| 2 | Roll **Oregon FIRST** (its WebRTC host and certificate change): `roll.sh --drain-wait 60` over SSM (README "Releases"). Phase certs issues the `stream-usw2.gkoi.com` lineage with both names, then the pools come up on it. | on the box `media-bootstrap.sh check` → `cert: stream-usw2.gkoi.com names stream-usw2.gkoi.com stream.gkoi.com` and exit 0. From outside: `openssl s_client -connect 32.188.243.42:11936 -servername stream.gkoi.com </dev/null 2>/dev/null \| openssl x509 -noout -ext subjectAltName` → `DNS:stream-usw2.gkoi.com, DNS:stream.gkoi.com` (both names); `nc -vz stream-usw2.gkoi.com 11936` → open |
-| 3 | Roll euc1, then use1, then apne1 — ONE box at a time (each re-issues its lineage with `stream.gkoi.com` by DNS-01; four boxes write the same `_acme-challenge.stream.gkoi.com` TXT name — one at a time avoids the collision; Let's Encrypt's duplicate limit is 5 / week per exact name set, and every set differs) | the same `check` + `openssl s_client -connect <EIP>:11936 -servername stream.gkoi.com …` → `DNS:stream-<r>.gkoi.com, DNS:stream.gkoi.com`; SRT: the pool's registry entry carries `publicSrtPort` (`redis-cli GET relay:registry:pool:<box>-p0` from an ECS Exec shell) |
-| 4 | After the agents run (≥ 3 minutes): the health checks | `aws cloudwatch describe-alarms --region <r> --alarm-names gkoi-prod2-media-<key>-ingest-not-accepting --query 'MetricAlarms[0].StateValue'` → `OK`; `aws route53 get-health-check-status --health-check-id <terraform output ingest … health_check_id>` → every checker `Success`. `ALARM` = read the agent's `ingest accepting` line's `reasons` (CloudWatch …/container) |
+| 1 | Commit the five media values above (NOT `ingest_auto_latency_records`); `tools/gkoi-infra-run media plan` — expect **41 to add, 12 to change, 0 to destroy** (review plan 2026-11-25): per region 10 = 2 SRT SG rules, 3 metric filters (accepting 0 / 1, cert failure), 2 alarms, 3 health checks; + `module.box_usw2[0].aws_route53_record.live["stream-usw2.gkoi.com"]`; in place: the 4 config parameters, the 4 box policies (DNS-01 scope), 3 bundle objects (`cloudwatch-agent.json.tmpl` — main's own pending change — `media-bootstrap.sh`, `roll.sh`), `terraform_data.preflight` (if the image apply already shipped this branch's bundle, the bundle objects drop out of the change count). Anything destroyed = stop. Then `apply`. This also creates `stream-usw2.gkoi.com` (A → Oregon's EIP). | `for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @$r stream-usw2.gkoi.com; done` → `32.188.243.42` three times (do NOT dig it before it exists: the zone caches NXDOMAIN for 900 s). `aws ec2 describe-security-group-rules --region <r> --filters Name=group-id,Values=<box sg> --query "SecurityGroupRules[?IpProtocol=='udp'].[FromPort,CidrIpv4]"` → 8189, 8289, **18890, 28890** |
+| 2 | Roll **Oregon FIRST** (its WebRTC host and certificate change): `roll.sh --drain-wait 60 --dns-drain-wait 0` over SSM (README "Releases"; the roll's output also lands in …/bootstrap, where the cert-failure filter reads it). Phase certs issues the `stream-usw2.gkoi.com` lineage with both names, then the pools come up on it. | on the box `media-bootstrap.sh check` → `cert: stream-usw2.gkoi.com names stream-usw2.gkoi.com stream.gkoi.com` and exit 0. From outside: `openssl s_client -connect 32.188.243.42:11936 -servername stream.gkoi.com </dev/null 2>/dev/null \| openssl x509 -noout -ext subjectAltName` → `DNS:stream-usw2.gkoi.com, DNS:stream.gkoi.com` (both names); `nc -vz stream-usw2.gkoi.com 11936` → open |
+| 3 | Roll euc1, then use1, then apne1 — ONE box at a time, the same `roll.sh` line (each re-issues its lineage with `stream.gkoi.com` by DNS-01; four boxes write the same `_acme-challenge.stream.gkoi.com` TXT name — one at a time avoids the collision; Let's Encrypt's duplicate limit is 5 / week per exact name set, and every set differs) | the same `check` + `openssl s_client -connect <EIP>:11936 -servername stream.gkoi.com …` → `DNS:stream-<r>.gkoi.com, DNS:stream.gkoi.com`; SRT: the pool's registry entry carries `publicSrtPort` (`redis-cli GET relay:registry:pool:<box>-p0` from an ECS Exec shell) |
+| 4 | The health checks — STABLE, not one reading. The alarms start `INSUFFICIENT_DATA` → `ALARM` (missing data = breaching) and turn `OK` once the agents log `IngestAccepting` 1; then wait until each region has been `OK` with NO state change for **30 minutes**, before the swap | per region: `aws cloudwatch describe-alarms --region <r> --alarm-names gkoi-prod2-media-<key>-ingest-not-accepting --query 'MetricAlarms[0].StateValue'` → `OK` AND `aws cloudwatch describe-alarm-history --region <r> --alarm-name gkoi-prod2-media-<key>-ingest-not-accepting --history-item-type StateUpdate --start-date "$(date -u -d '-30 min' +%FT%TZ)" --query 'length(AlarmHistoryItems)'` → `0`; and for each of the three ids of the region (`auto`, `auto_accepting`, `auto_tcp` — the calculated one is in `terraform output -json ingest`): `aws route53 get-health-check-status --health-check-id <id> --query 'HealthCheckObservations[].StatusReport.Status'` → `Success` from EVERY checker. `ALARM` = read the agent's `ingest accepting` line's `reasons` (CloudWatch …/container) |
 | 5 | compute: commit `ingest_auto_host = "stream.gkoi.com"`; `tools/gkoi-infra-run compute plan` → only the engine task definitions (+ 3 env values) and their services; apply. AFTER the media agents (the engine env example's deploy order). | `healthz`; a stream key's lists carry `auto` first (`stream.gkoi.com:11936` / `:18890`) |
-| 6 | The DNS swap: `terraform output -json ingest > ingest.json` (media) → `tools/gkoi-one-ingest-dns-swap ingest.json` PRINTS the checks, the ONE change batch (DELETE the plain A + CREATE the four latency records), the `terraform state rm` + four `terraform import` lines, and the rollback batch. Submit the batch (write credentials), then the state lines from the commit that sets `ingest_auto_latency_records = true`; `gkoi-infra-run media plan` → no record created or destroyed | `for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @$r stream.gkoi.com; done` → ONE address each (from here: Oregon's); `aws route53 test-dns-answer … --edns0-client-subnet-ip <a German / US-East / Japanese address>` → that region's EIP; the health checks still green |
-| 7 | The prod proof (spec §10) + the operator's VPN pass | the admin "Ingest accuracy" view |
+| 6 | The DNS swap: `terraform output -json ingest > ingest.json` (media) → `tools/gkoi-one-ingest-dns-swap ingest.json` PRINTS the checks, the ONE change batch (DELETE the plain A + CREATE the four latency records), the `terraform state rm` + four `terraform import` lines, and the rollback batch. Submit the batch (write credentials), then the state lines from the commit that sets `ingest_auto_latency_records = true`; `gkoi-infra-run media plan` → no record created or destroyed | `for r in 1.1.1.1 8.8.8.8 9.9.9.9; do dig +short @$r stream.gkoi.com; done` → ONE address each, one of the four EIPs: the region nearest THAT RESOLVER (or the client subnet it forwards) — from Europe Frankfurt's `3.123.247.53`, not Oregon's; it proves the latency set answers, not which region. The per-region proof: `aws route53 test-dns-answer --hosted-zone-id Z07245612XI342WI698UZ --record-name stream.gkoi.com --record-type A --resolver-ip 198.51.100.1 --edns0-client-subnet-ip <a German / a US-East / a US-West / a Japanese address>` → euc1 / use1 / usw2 / apne1's EIP; the health checks still green |
+| 7 | Oregon's old one-name lineage: over SSM on the usw2 box `certbot delete --non-interactive --cert-name stream.gkoi.com` (nothing reads it since step 2; it would otherwise keep renewing). Not on any other box (they never had it) | `certbot certificates` lists `stream-usw2.gkoi.com` (Domains: `stream-usw2.gkoi.com stream.gkoi.com`) and no `stream.gkoi.com` lineage; `media-bootstrap.sh check` exit 0; `openssl s_client -connect 32.188.243.42:11936 -servername stream.gkoi.com …` still shows both names |
+| 8 | The prod proof (spec §10) + the operator's VPN pass | the admin "Ingest accuracy" view |
+
+**Renewals of the shared name.** Every box's lineage carries `stream.gkoi.com`, so every renewal writes the TXT record
+`_acme-challenge.stream.gkoi.com`. Two boxes renewing in the same minute can fail ONE validation (each replaces the
+other's value); the next certbot timer run (twice a day, 30 days before expiry) heals it, and the `…-cert-failure`
+alarm reports the failed run. No action unless the alarm repeats for days.
 
 **When a certificate does not issue** (DNS-01 refused, rate limit, Let's Encrypt down): phase certs stops the roll
-BEFORE env / compose, so that box keeps running on its previous config (old lineage, old names) — nothing is broken.
-Then the automatic address is LEFT OFF for this release: compute `ingest_auto_host = ""` (the api lists no `auto`), no
-DNS swap (`stream.gkoi.com` stays a plain record → Oregon), and the regional names carry the release. If it was
-**Oregon's** new lineage that failed, also drop the rename (`ingest_regional_stream_hosts = {}`) and re-apply + roll, so
-Oregon serves `stream.gkoi.com` on its existing lineage as today. The `…-cert-failure` alarm and
+BEFORE env / compose, so that box keeps running its previous containers (old lineage, old names; the 1.1.8 images are
+already on it — they were rolled first). That is NOT a resting state: `cert_sans` stays in the box's config, and phase
+certs would die again on EVERY later roll, before env / compose — the box could never take new images. So the
+automatic address is turned OFF for this release, on both sides, at once:
+1. media: `ingest_auto_host = ""` — and, if it was **Oregon's** new lineage that failed, also
+   `ingest_regional_stream_hosts = {}` (Oregon keeps serving `stream.gkoi.com` on its existing lineage, as today);
+   `ingest_srt` / GeoIP / the cert alarms may stay. Commit, `gkoi-infra-run media plan` (the health checks, accepting
+   filters and alarms are DESTROYED — `--allow-destroy`; nothing else), apply;
+2. re-roll EVERY box that already took the new config (`roll.sh --drain-wait 60 --dns-drain-wait 0`), so the configs
+   no longer carry `cert_sans`; `media-bootstrap.sh check` exit 0 on each;
+3. compute `ingest_auto_host = ""` (the api lists no `auto`) — or never set it, if step 5 was not reached;
+4. no DNS swap: `stream.gkoi.com` stays the plain record → Oregon; the regional names carry the release.
+A box that already re-issued its lineage with both names keeps a valid certificate either way (the extra name is
+harmless). The `…-cert-failure` alarm and
 `/var/log/letsencrypt/letsencrypt.log` (→ CloudWatch …/bootstrap, stream `<instance>-certbot`) say why. Retry
 later, one box at a time; `acme_staging = true` proves the DNS-01 path without spending the weekly limit.
 
@@ -542,9 +576,9 @@ their own) or set the explicit `INGEST_AUTO_*_PORT` (compute). And `pool_count` 
 calculated ≈ $0.50–1 each) + 8 alarms ≈ **$10–15 / month**; the TCP checks open ~1 connection per checker every 10 s on
 pool 0 — two RTMPS log lines each (`opened` / `closed: EOF`) shipped to …/container (≈ tens of MB / month per box).
 
-**Not verified without a write** (the rehearsal / the day): the `$.log` regex filter against a live `IngestAccepting`
-line (the Docker wrapper `{"log": …}` WAS checked on a live box, 2026-11-25; the agent's line format from the engine
-code); certbot's `--expand` on an existing ECDSA one-name lineage non-interactively; the regex-filter quota (5 per log
+**Not verified without a write** (the rehearsal / the day): the two `IngestAccepting` filters against a LIVE agent line
+(the regex constructs were proven on live Docker-wrapped lines with `FilterLogEvents` — "Before the day" — and the exact
+patterns against the agent's line format from the engine code with `grep -P`; `TestMetricFilter` is denied to the role); certbot's `--expand` on an existing ECDSA one-name lineage non-interactively; the regex-filter quota (5 per log
 group — `DescribeMetricFilters` is denied to the orchestrator role, so existing filters were not listed); Route 53's
 alarm-check timing end to end (spec §5: 2–4 min + TTL); that no other session queries `stream-usw2` before step 1.
 
@@ -553,11 +587,11 @@ alarm-check timing end to end (spec §5: 2–4 min + TTL); that no other session
 The orchestrator role cannot read some data sources (the AMI parameter, the CloudFront prefix list, the secrets'
 resource policies) nor refresh the roles / objects, so the plans ran with `-refresh=false` on a scratch copy whose
 unreadable data sources were pinned to the values the last apply recorded (ids / ARNs). They show what the CODE
-changes against the state, not live drift. Defaults: media **0 / 11 / 0** (origin/main itself: 0 / 10 / 0 — its
+changes against the state, not live drift. Defaults: media **0 / 12 / 0** (origin/main itself: 0 / 10 / 0 — its
 `cloudwatch-agent.json.tmpl` bundle object and the four config parameters are an unapplied main change; the four box
 policies show as updates only because their document is "read during apply"); this branch adds only
-`aws_s3_object.bundle["media-bootstrap.sh"]`. compute: **No changes** (main and branch). Feature on (before the swap):
-media **41 / 11 / 0** (above); compute `ingest_auto_host` on: **3 / 2 / 3** — the three engine task definitions
+`aws_s3_object.bundle["media-bootstrap.sh"]` and `["roll.sh"]`. compute: **No changes** (main and branch). Feature on
+(before the swap): media **41 / 12 / 0** (above); compute `ingest_auto_host` on: **3 / 2 / 3** — the three engine task definitions
 (api, worker, migrate) are REPLACED (task definitions are immutable: a new revision, the old one deregistered — every
 env change looks like this; `--allow-destroy`) and the two services updated in place. With
 `ingest_auto_latency_records = true` and no state operation the plan STOPS on prevent_destroy of

@@ -342,7 +342,7 @@ variable "ingest_auto_latency_records" {
   description = <<-EOT
     true = ingest_auto_host is FOUR latency A records (one per region, set identifier = the key) with the calculated
     health checks, and the plain A record of that name is no longer managed. Turned on ONLY after the manual Route 53
-    change batch + `terraform state rm` + `terraform import` (tools/one-ingest-dns-swap.sh prints them); a plan with
+    change batch + `terraform state rm` + `terraform import` (tools/gkoi-one-ingest-dns-swap prints them); a plan with
     this on and the old record still in state stops on prevent_destroy — on purpose.
   EOT
   type        = bool

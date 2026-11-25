@@ -281,9 +281,12 @@ cert_extra_names() { # LINEAGE → the extra names the config wants on it (cert_
 }
 
 cert_names_on_disk() { # LINEAGE → the DNS names its certificate carries, sorted, one per line (nothing when there is none)
-  local f="/etc/letsencrypt/live/$1/cert.pem"
+  local f="/etc/letsencrypt/live/$1/cert.pem" out
   [ -s "$f" ] || return 0
-  openssl x509 -noout -ext subjectAltName -in "$f" 2>/dev/null | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p' | sort -u
+  # Captured first (not piped): under pipefail a failing openssl would otherwise end the caller with no message.
+  out="$(openssl x509 -noout -ext subjectAltName -in "$f" 2>&1)" \
+    || die "certs: cannot read the names of $f (openssl: $(head -1 <<< "$out")) — inspect the lineage, or 'certbot delete --cert-name $1' and re-run"
+  printf '%s\n' "$out" | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS://p' | sort -u
 }
 
 cert_want_names() { # LINEAGE → the names it must carry (itself + cert_sans), sorted, one per line
